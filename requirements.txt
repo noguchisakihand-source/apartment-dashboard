@@ -1,0 +1,14 @@
+# Data fetching
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Database
+# sqlite3 is built-in
+
+# Configuration
+pyyaml>=6.0.0
+
+# Dashboard & Visualization
+streamlit>=1.30.0
+plotly>=5.18.0
+pandas>=2.1.0
