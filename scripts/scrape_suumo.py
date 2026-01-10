@@ -66,7 +66,7 @@ def build_search_url(prefecture: str, area_code: str, page: int = 1) -> str:
     base = BASE_URL.format(prefecture=prefecture, area_code=area_code)
 
     if page > 1:
-        return f"{base}?pn={page}"
+        return f"{base}?page={page}"
 
     return base
 
@@ -543,8 +543,8 @@ def main():
     print("SUUMOスクレイピング開始")
     print(f"実行日時: {datetime.now().isoformat()}")
 
-    # 本番実行: 各区20ページ（200件程度）
-    results = scrape_all_wards(max_pages_per_ward=20)
+    # 本番実行: 各地域50ページ（最大1000件/地域）
+    results = scrape_all_wards(max_pages_per_ward=50)
 
     print("\n=== 結果サマリー ===")
     print(f"総取得件数: {results['total_scraped']}")
