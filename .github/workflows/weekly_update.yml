@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # 全履歴を取得（rebase用）
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,7 +84,9 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add data/apartment.db
           git commit -m "chore: weekly data update $(date +'%Y-%m-%d')"
-          git push
+          # リモートの変更を取り込んでからpush（コンフリクト防止）
+          git pull --rebase origin main
+          git push origin main
 
       - name: Summary
         run: |
