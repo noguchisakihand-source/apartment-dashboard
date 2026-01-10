@@ -131,14 +131,76 @@ def parse_station_info(station_str: str) -> Tuple[Optional[str], Optional[int]]:
     if not station_str:
         return None, None
 
-    # 「新交通ゆりかもめ「有明」徒歩6分」形式
-    station_match = re.search(r"[「『]([^」』]+)[」』]", station_str)
+    # 徒歩分を先に取得
     walk_match = re.search(r"徒歩(\d+)分", station_str)
-
-    station_name = station_match.group(1) if station_match else None
     minutes = int(walk_match.group(1)) if walk_match else None
 
+    # 駅名パターン（優先度順）
+    station_name = None
+
+    # パターン1: 「駅名」徒歩X分 の形式（徒歩の直前の「」内）
+    pattern1 = re.search(r"[「『]([^」』]{1,15})[」』]\s*徒歩\d+分", station_str)
+    if pattern1:
+        station_name = pattern1.group(1)
+
+    # パターン2: 路線名「駅名」の形式
+    if not station_name:
+        # JR/私鉄/地下鉄の路線名の後の「」
+        pattern2 = re.search(
+            r"(?:JR|東京メトロ|都営|東急|小田急|京王|西武|東武|京成|京急|相鉄|りんかい線|ゆりかもめ|日暮里・舎人ライナー|つくばエクスプレス|[^\s「」]{2,8}線)[「『]([^」』]{1,10})[」』]",
+            station_str
+        )
+        if pattern2:
+            station_name = pattern2.group(1)
+
+    # パターン3: 「駅名」駅 の形式
+    if not station_name:
+        pattern3 = re.search(r"[「『]([^」』]{1,10})[」』]駅", station_str)
+        if pattern3:
+            station_name = pattern3.group(1)
+
+    # 駅名のバリデーション
+    if station_name:
+        station_name = validate_station_name(station_name)
+
     return station_name, minutes
+
+
+def validate_station_name(name: str) -> Optional[str]:
+    """駅名が有効かどうかをバリデーション"""
+    if not name:
+        return None
+
+    # 長すぎる場合は無効（駅名は通常10文字以内）
+    if len(name) > 12:
+        return None
+
+    # 無効なキーワードを含む場合は除外
+    invalid_keywords = [
+        "グループ", "会社", "物件", "価格", "万円", "特典", "対象",
+        "販売", "所在地", "資料請求", "お気に入り", "追加",
+        "リノベ", "リフォーム", "角住戸", "最上階", "完工",
+        "パークハウス", "パークシティ", "プラウド", "ブリリア",
+        "ザ・", "The ", "Residence", "Luxury", "Legacy", "Elegance",
+        "Skyline", "Grand",
+        "㎡", "LDK", "DK", "階建", "築年", "沿線", "眺望",
+        "ペット", "角部屋", "南向き", "東向き", "西向き", "北向き",
+        "ガーデン", "クロック", "シリーズ"
+    ]
+    for keyword in invalid_keywords:
+        if keyword in name:
+            return None
+
+    # 英数字のみの場合は無効（ただし短い場合は許可）
+    if re.match(r"^[A-Za-z0-9\s]+$", name) and len(name) > 5:
+        return None
+
+    # 数字が多い場合は無効（価格などの誤認識）
+    digit_count = len(re.findall(r"\d", name))
+    if digit_count > 2:
+        return None
+
+    return name
 
 
 def parse_floor_info(floor_str: str) -> Tuple[Optional[int], Optional[int]]:
