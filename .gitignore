@@ -1,0 +1,28 @@
+# Environment variables
+.env
+.env.local
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (geocode_cache is large, exclude)
+data/geocode_cache.json
+
+# Keep apartment.db for Streamlit Cloud deployment
+# data/apartment.db is tracked

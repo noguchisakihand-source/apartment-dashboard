@@ -60,39 +60,18 @@ def build_search_url(ward_code: str, page: int = 1) -> str:
 
 
 def filter_listing(listing: Dict) -> bool:
-    """物件がフィルター条件を満たすかチェック"""
-    config = load_config()
-    filters = config.get("filters", {})
-
+    """物件がフィルター条件を満たすかチェック（スクレイピング時は緩い条件）"""
     price = listing.get("asking_price")
     area = listing.get("area")
-    minutes = listing.get("minutes_to_station")
-    floor_plan = listing.get("floor_plan", "")
 
-    # 価格フィルター
-    price_min = filters.get("price_min", 50000000)
-    price_max = filters.get("price_max", 130000000)
-    if price and (price < price_min or price > price_max):
+    # スクレイピング時は緩い条件（ダッシュボードで詳細フィルター）
+    # 価格: 3000万〜2億（幅広く取得）
+    if price and (price < 30000000 or price > 200000000):
         return False
 
-    # 面積フィルター
-    area_min = filters.get("area_min", 50)
-    if area and area < area_min:
+    # 面積: 40㎡以上（ファミリー向け候補）
+    if area and area < 40:
         return False
-
-    # 駅徒歩フィルター
-    walk_max = filters.get("minutes_to_station_max", 15)
-    if minutes and minutes > walk_max:
-        return False
-
-    # 間取りフィルター（2LDK以上）
-    if floor_plan:
-        # 数字を抽出
-        match = re.search(r"(\d+)", floor_plan)
-        if match:
-            rooms = int(match.group(1))
-            if rooms < 2:
-                return False
 
     return True
 
@@ -267,20 +246,46 @@ def parse_property_card(card: BeautifulSoup, default_ward: str) -> Optional[Dict
     listing["station_name"] = station_name
     listing["minutes_to_station"] = minutes
 
-    # 面積
-    area_match = re.search(r"([\d.]+)m[2²㎡]", text)
-    if area_match:
-        listing["area"] = float(area_match.group(1))
+    # 面積（50㎡以上のみ採用、駅距離との混同を避ける）
+    area_matches = re.findall(r"([\d.]+)\s*m\s*[2²㎡]?", text)
+    for match in area_matches:
+        try:
+            area_val = float(match)
+            if 30 <= area_val <= 200:  # 妥当な面積範囲
+                listing["area"] = area_val
+                break
+        except ValueError:
+            continue
 
     # 間取り
     plan_match = re.search(r"(\d[LDKS]+|\d+LDK|\d+DK|\d+K)", text)
     if plan_match:
         listing["floor_plan"] = plan_match.group(1)
 
-    # 築年
-    year_match = re.search(r"(\d{4})年\d*月?(?:築)?", text)
+    # 築年（リノベ・リフォーム年と区別する）
+    # 優先度1: 「築年月」ラベルの後の年
+    year_match = re.search(r"築年月\s*[:：]?\s*(\d{4})年", text)
     if year_match:
         listing["building_year"] = int(year_match.group(1))
+    else:
+        # 優先度2: 「○年○月築」パターン
+        year_match = re.search(r"(\d{4})年\d*月?築", text)
+        if year_match:
+            listing["building_year"] = int(year_match.group(1))
+        else:
+            # 優先度3: リノベ・リフォーム以外の文脈での年（1960-2010年の範囲で古い方を採用）
+            # 2020年以降はリノベ年の可能性が高いため除外
+            year_matches = re.findall(r"(\d{4})年", text)
+            valid_years = []
+            for y in year_matches:
+                year_int = int(y)
+                # リノベ・リフォームの近くにある年は除外
+                pattern = rf"(リノベ|リフォーム|改装|内装).{{0,20}}{y}年|{y}年.{{0,20}}(リノベ|リフォーム|改装|完了|完成)"
+                if not re.search(pattern, text) and 1960 <= year_int <= 2025:
+                    valid_years.append(year_int)
+            if valid_years:
+                # 最も古い年を築年とする（新しい年はリノベ年の可能性）
+                listing["building_year"] = min(valid_years)
 
     # 階数
     floor_match = re.search(r"(\d+)階[/／](\d+)階建", text)
@@ -440,8 +445,8 @@ def main():
     print("SUUMOスクレイピング開始")
     print(f"実行日時: {datetime.now().isoformat()}")
 
-    # テスト実行: 各区1ページのみ
-    results = scrape_all_wards(max_pages_per_ward=1)
+    # 本番実行: 各区20ページ（200件程度）
+    results = scrape_all_wards(max_pages_per_ward=20)
 
     print("\n=== 結果サマリー ===")
     print(f"総取得件数: {results['total_scraped']}")
