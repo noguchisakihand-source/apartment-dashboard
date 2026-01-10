@@ -2,7 +2,7 @@
 """
 SUUMOスクレイパー
 
-対象: 東京都9区の中古マンション
+対象: 東京都12区 + 千葉県3市の中古マンション
 条件: 2LDK以上、50㎡以上、駅徒歩15分以内、5,000万〜1.3億
 """
 
@@ -23,24 +23,36 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from scripts.utils.db import get_connection
 from scripts.utils.config import load_config
 
-# 区コードマッピング
-WARD_CODES = {
-    "大田区": "sc_ota",
-    "葛飾区": "sc_katsushika",
-    "世田谷区": "sc_setagaya",
-    "品川区": "sc_shinagawa",
-    "中央区": "sc_chuo",
-    "墨田区": "sc_sumida",
-    "江東区": "sc_koto",
-    "台東区": "sc_taito",
-    "江戸川区": "sc_edogawa",
+# 地域コードマッピング（都道府県, SUUMOコード）
+AREA_CODES = {
+    # 東京都（既存9区）
+    "大田区": ("tokyo", "sc_ota"),
+    "葛飾区": ("tokyo", "sc_katsushika"),
+    "世田谷区": ("tokyo", "sc_setagaya"),
+    "品川区": ("tokyo", "sc_shinagawa"),
+    "中央区": ("tokyo", "sc_chuo"),
+    "墨田区": ("tokyo", "sc_sumida"),
+    "江東区": ("tokyo", "sc_koto"),
+    "台東区": ("tokyo", "sc_taito"),
+    "江戸川区": ("tokyo", "sc_edogawa"),
+    # 東京都（追加3区）
+    "足立区": ("tokyo", "sc_adachi"),
+    "目黒区": ("tokyo", "sc_meguro"),
+    "荒川区": ("tokyo", "sc_arakawa"),
+    # 千葉県
+    "市川市": ("chiba", "sc_ichikawa"),
+    "松戸市": ("chiba", "sc_matsudo"),
+    "浦安市": ("chiba", "sc_urayasu"),
 }
+
+# 後方互換用（既存コードとの互換性）
+WARD_CODES = {name: code for name, (_, code) in AREA_CODES.items()}
 
 # 間取りコード（2LDK以上）
 # ts=7: 2LDK, ts=8: 3K, ts=9: 3DK, ts=10: 3LDK, ts=11: 4K以上
 FLOOR_PLAN_CODES = [7, 8, 9, 10, 11]
 
-BASE_URL = "https://suumo.jp/ms/chuko/tokyo/{ward_code}/"
+BASE_URL = "https://suumo.jp/ms/chuko/{prefecture}/{area_code}/"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -49,9 +61,9 @@ HEADERS = {
 }
 
 
-def build_search_url(ward_code: str, page: int = 1) -> str:
+def build_search_url(prefecture: str, area_code: str, page: int = 1) -> str:
     """検索URLを構築（フィルターはPython側で適用）"""
-    base = BASE_URL.format(ward_code=ward_code)
+    base = BASE_URL.format(prefecture=prefecture, area_code=area_code)
 
     if page > 1:
         return f"{base}?pn={page}"
@@ -238,10 +250,10 @@ def generate_suumo_id(url: str) -> str:
 
 
 def extract_ward_from_address(address: str) -> Optional[str]:
-    """住所から区名を抽出"""
-    for ward in WARD_CODES.keys():
-        if ward in address:
-            return ward
+    """住所から区名/市名を抽出"""
+    for area_name in AREA_CODES.keys():
+        if area_name in address:
+            return area_name
     return None
 
 
@@ -295,8 +307,8 @@ def parse_property_card(card: BeautifulSoup, default_ward: str) -> Optional[Dict
         price_str = price_match.group(0)
         listing["asking_price"] = parse_price(price_str)
 
-    # 所在地
-    address_match = re.search(r"東京都[^\s]+区[^\s]*", text)
+    # 所在地（東京都/千葉県に対応）
+    address_match = re.search(r"(東京都[^\s]+区[^\s]*|千葉県[^\s]+市[^\s]*)", text)
     if address_match:
         listing["address"] = address_match.group(0)
         listing["ward_name"] = extract_ward_from_address(listing["address"]) or default_ward
@@ -396,17 +408,18 @@ def get_total_pages(soup: BeautifulSoup) -> int:
 
 
 def scrape_ward(ward_name: str, max_pages: int = 3) -> List[Dict]:
-    """1つの区をスクレイピング"""
-    ward_code = WARD_CODES.get(ward_name)
-    if not ward_code:
-        print(f"不明な区: {ward_name}")
+    """1つの区/市をスクレイピング"""
+    area_info = AREA_CODES.get(ward_name)
+    if not area_info:
+        print(f"不明な地域: {ward_name}")
         return []
 
+    prefecture, area_code = area_info
     all_listings = []
     page = 1
 
     while page <= max_pages:
-        url = build_search_url(ward_code, page)
+        url = build_search_url(prefecture, area_code, page)
         print(f"  ページ {page}: {url}")
 
         try:
@@ -494,9 +507,9 @@ def save_listings(listings: List[Dict]) -> int:
 
 
 def scrape_all_wards(max_pages_per_ward: int = 3) -> Dict:
-    """全区をスクレイピング"""
+    """全地域をスクレイピング"""
     config = load_config()
-    target_wards = config.get("target_wards", list(WARD_CODES.keys()))
+    target_wards = config.get("target_wards", list(AREA_CODES.keys()))
 
     results = {
         "total_scraped": 0,
