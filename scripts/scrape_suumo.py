@@ -461,6 +461,10 @@ def save_listings(listings: List[Dict]) -> int:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
                     ON CONFLICT(suumo_id) DO UPDATE SET
                         asking_price = excluded.asking_price,
+                        station_name = COALESCE(excluded.station_name, station_name),
+                        minutes_to_station = COALESCE(excluded.minutes_to_station, minutes_to_station),
+                        floor = COALESCE(excluded.floor, floor),
+                        total_floors = COALESCE(excluded.total_floors, total_floors),
                         status = 'active',
                         updated_at = excluded.updated_at
                 """, (
