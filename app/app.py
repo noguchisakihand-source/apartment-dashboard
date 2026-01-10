@@ -458,13 +458,14 @@ def render_top100(df: pd.DataFrame):
         )
 
         st.dataframe(
-            display_df[["property_name", "ward_name", "asking_price", "deal_score", "area", "building_age", "suumo_url"]],
+            display_df[["property_name", "ward_name", "asking_price", "market_price", "deal_score", "area", "building_age", "suumo_url"]],
             width="stretch",
             hide_index=True,
             column_config={
                 "property_name": st.column_config.TextColumn("物件名"),
                 "ward_name": st.column_config.TextColumn("区"),
-                "asking_price": st.column_config.NumberColumn("価格", format="%.0f万"),
+                "asking_price": st.column_config.NumberColumn("価格(万)", format="%.0f"),
+                "market_price": st.column_config.NumberColumn("相場(万)", format="%.0f"),
                 "deal_score": st.column_config.NumberColumn("スコア", format="%+.1f%%"),
                 "area": st.column_config.NumberColumn("面積", format="%.0f㎡"),
                 "building_age": st.column_config.TextColumn("築年"),
@@ -564,6 +565,8 @@ def render_table(df: pd.DataFrame):
 
         with col4:
             st.markdown(f"**{row['asking_price']/10000:,.0f}万円**")
+            if pd.notna(row['market_price']):
+                st.caption(f"相場 {row['market_price']/10000:,.0f}万円")
             if pd.notna(row['deal_score']):
                 color = "green" if row['deal_score'] > 0 else "red"
                 st.markdown(f"<span style='color:{color}'>{row['deal_score']:+.1f}%</span>", unsafe_allow_html=True)
@@ -625,6 +628,8 @@ def render_compare(df: pd.DataFrame):
 
             # 比較項目
             st.metric("価格", f"{row['asking_price']/10000:,.0f}万円")
+            if pd.notna(row['market_price']):
+                st.metric("相場価格", f"{row['market_price']/10000:,.0f}万円")
 
             # ㎡単価
             if pd.notna(row['area']) and row['area'] > 0:
