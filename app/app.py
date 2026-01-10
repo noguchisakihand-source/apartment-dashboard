@@ -11,13 +11,18 @@ from pathlib import Path
 # scriptsディレクトリをパスに追加
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
+from datetime import datetime
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
 from utils.db import get_connection
-from utils.config import get_target_wards, get_filters
+from utils.config import get_target_wards
+
+# 現在の年（築年数計算用）
+CURRENT_YEAR = datetime.now().year
 
 # ページ設定
 st.set_page_config(
@@ -66,9 +71,31 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 
     # 築年数フィルター
     if filters.get("age_max"):
-        import datetime
-        min_year = datetime.datetime.now().year - filters["age_max"]
+        min_year = CURRENT_YEAR - filters["age_max"]
         filtered = filtered[filtered["building_year"] >= min_year]
+
+    # 間取りフィルター
+    if filters.get("floor_plans"):
+        def match_floor_plan(fp):
+            if pd.isna(fp):
+                return False
+            fp = str(fp).upper()
+            for selected in filters["floor_plans"]:
+                if selected == "4LDK+":
+                    # 4LDK, 5LDK, 4SLDKなどにマッチ
+                    if any(x in fp for x in ["4LDK", "5LDK", "6LDK", "4SLDK", "5SLDK"]):
+                        return True
+                elif selected in fp:
+                    return True
+            return False
+        filtered = filtered[filtered["floor_plan"].apply(match_floor_plan)]
+
+    # 駅徒歩フィルター
+    if filters.get("walk_max"):
+        filtered = filtered[
+            filtered["minutes_to_station"].notna() &
+            (filtered["minutes_to_station"] <= filters["walk_max"])
+        ]
 
     # スコアがある物件のみ
     if filters.get("score_only"):
@@ -80,6 +107,11 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 def render_sidebar() -> dict:
     """サイドバーにフィルターを表示"""
     st.sidebar.header("フィルター")
+
+    # リセットボタン
+    if st.sidebar.button("🔄 フィルターをリセット", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
 
     filters = {}
 
@@ -114,6 +146,33 @@ def render_sidebar() -> dict:
         max_value=50,
         value=30,
     )
+
+    # 間取り
+    st.sidebar.subheader("間取り")
+    floor_plan_options = ["1LDK", "2LDK", "3LDK", "4LDK+"]
+    filters["floor_plans"] = st.sidebar.multiselect(
+        "間取り",
+        options=floor_plan_options,
+        default=floor_plan_options,
+        label_visibility="collapsed",
+    )
+
+    # 駅徒歩
+    st.sidebar.subheader("駅徒歩")
+    walk_options = {
+        "指定なし": None,
+        "5分以内": 5,
+        "10分以内": 10,
+        "15分以内": 15,
+    }
+    walk_selection = st.sidebar.radio(
+        "駅徒歩",
+        options=list(walk_options.keys()),
+        index=2,  # デフォルト: 10分以内
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    filters["walk_max"] = walk_options[walk_selection]
 
     # スコアフィルター
     filters["score_only"] = st.sidebar.checkbox("スコア算出済みのみ", value=True)
@@ -156,7 +215,7 @@ def render_map(df: pd.DataFrame):
 価格: {r['asking_price']/10000:,.0f}万円<br>
 相場: {r['market_price']/10000:,.0f}万円<br>
 スコア: {r['deal_score']:+.1f}%<br>
-面積: {r['area']:.0f}㎡ / 築{2026 - r['building_year']}年
+面積: {r['area']:.0f}㎡ / 築{CURRENT_YEAR - r['building_year']}年
         """.strip() if pd.notna(r['deal_score']) else f"""
 <b>{r['property_name'][:30]}...</b><br>
 価格: {r['asking_price']/10000:,.0f}万円<br>
@@ -244,7 +303,7 @@ def render_top100(df: pd.DataFrame):
 
         with col2:
             st.markdown(f"**{row['property_name'][:40]}**")
-            st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / 築{2026 - row['building_year']}年")
+            st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / 築{CURRENT_YEAR - row['building_year']}年")
 
         with col3:
             st.metric(
@@ -292,8 +351,9 @@ def render_table(df: pd.DataFrame):
 
     # 表示用に整形（数値カラムを保持してソート可能に）
     display_df = df_sorted[[
-        "ward_name", "property_name", "asking_price", "market_price",
-        "deal_score", "area", "floor_plan", "building_year", "suumo_url"
+        "ward_name", "property_name", "station_name", "minutes_to_station",
+        "asking_price", "market_price", "deal_score", "area", "floor_plan",
+        "building_year", "suumo_url"
     ]].copy()
 
     # 数値を万円単位に変換（数値のまま）
@@ -308,20 +368,40 @@ def render_table(df: pd.DataFrame):
         column_config={
             "ward_name": st.column_config.TextColumn("区"),
             "property_name": st.column_config.TextColumn("物件名"),
+            "station_name": st.column_config.TextColumn("最寄駅"),
+            "minutes_to_station": st.column_config.NumberColumn("徒歩", format="%d分"),
             "asking_price": st.column_config.NumberColumn("売出価格", format="%.0f万"),
             "market_price": st.column_config.NumberColumn("相場価格", format="%.0f万"),
             "deal_score": st.column_config.NumberColumn("スコア", format="%+.1f%%"),
             "area": st.column_config.NumberColumn("面積", format="%.0f㎡"),
             "floor_plan": st.column_config.TextColumn("間取り"),
             "building_year": st.column_config.NumberColumn("築年", format="%d年"),
-            "SUUMO": st.column_config.LinkColumn(
+            "suumo_url": st.column_config.LinkColumn(
                 "SUUMO",
                 display_text="詳細",
             ),
         },
     )
 
-    st.caption(f"全 {len(df_sorted)} 件")
+    # CSVエクスポート
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.caption(f"全 {len(df_sorted)} 件")
+    with col2:
+        csv_df = df_sorted[[
+            "ward_name", "property_name", "station_name", "minutes_to_station",
+            "asking_price", "market_price", "deal_score", "area", "floor_plan",
+            "building_year", "suumo_url"
+        ]].copy()
+        csv_df.columns = ["区", "物件名", "最寄駅", "徒歩(分)", "売出価格(円)",
+                         "相場価格(円)", "スコア(%)", "面積(㎡)", "間取り", "築年", "SUUMO URL"]
+        csv = csv_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            label="📥 CSV出力",
+            data=csv,
+            file_name="apartment_listings.csv",
+            mime="text/csv",
+        )
 
 
 def main():
