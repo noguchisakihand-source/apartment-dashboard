@@ -133,6 +133,7 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
         filtered = filtered[filtered["deal_score"] > 20]
     elif score_filter == "score_only":
         filtered = filtered[filtered["deal_score"].notna()]
+    # "all" の場合はフィルターしない（スコアなし物件も含む）
 
     return filtered
 
@@ -253,8 +254,9 @@ def render_sidebar(df: pd.DataFrame) -> dict:
     # スコアフィルター (#11)
     st.sidebar.subheader("スコア")
     score_options = {
-        "全て（スコアありのみ）": "score_only",
-        "お買い得のみ（>0%）": "bargain",
+        "全物件": "all",
+        "スコアありのみ": "score_only",
+        "お買い得（>0%）": "bargain",
         "超お買い得（>20%）": "super_bargain",
     }
     score_selection = st.sidebar.radio(
@@ -302,21 +304,28 @@ def render_map(df: pd.DataFrame):
         return f"築{CURRENT_YEAR - int(year)}年"
 
     # #12: ホバーテキストに駅情報追加
-    df_map["hover_text"] = df_map.apply(
-        lambda r: f"""
-<b>{r['property_name'][:30]}{'...' if len(str(r['property_name'])) > 30 else ''}</b><br>
-価格: {r['asking_price']/10000:,.0f}万円<br>
-相場: {r['market_price']/10000:,.0f}万円<br>
-スコア: {r['deal_score']:+.1f}%<br>
-{r['station_name'] or '駅不明'} 徒歩{int(r['minutes_to_station']) if pd.notna(r['minutes_to_station']) else '?'}分<br>
-{r['area']:.0f}㎡ / {format_age(r['building_year'])}
-        """.strip() if pd.notna(r['deal_score']) else f"""
-<b>{r['property_name'][:30]}{'...' if len(str(r['property_name'])) > 30 else ''}</b><br>
-価格: {r['asking_price']/10000:,.0f}万円<br>
-スコア: 算出不可
-        """.strip(),
-        axis=1
-    )
+    def build_hover_text(r):
+        name = r['property_name'][:30] + ('...' if len(str(r['property_name'])) > 30 else '')
+        price = f"{r['asking_price']/10000:,.0f}万円"
+        station = r['station_name'] or '駅不明'
+        walk = f"徒歩{int(r['minutes_to_station'])}分" if pd.notna(r['minutes_to_station']) else ''
+        area_info = f"{r['area']:.0f}㎡ / {format_age(r['building_year'])}"
+
+        if pd.notna(r['deal_score']):
+            market = f"相場: {r['market_price']/10000:,.0f}万円"
+            score = f"スコア: {r['deal_score']:+.1f}%"
+        else:
+            market = "相場: -"
+            score = "スコア: 未算出"
+
+        return f"""<b>{name}</b><br>
+価格: {price}<br>
+{market}<br>
+{score}<br>
+{station} {walk}<br>
+{area_info}""".strip()
+
+    df_map["hover_text"] = df_map.apply(build_hover_text, axis=1)
 
     # Plotlyマップ
     fig = go.Figure()
@@ -570,6 +579,8 @@ def render_table(df: pd.DataFrame):
             if pd.notna(row['deal_score']):
                 color = "green" if row['deal_score'] > 0 else "red"
                 st.markdown(f"<span style='color:{color}'>{row['deal_score']:+.1f}%</span>", unsafe_allow_html=True)
+            else:
+                st.caption("スコア: 未算出")
 
         with col5:
             if pd.notna(row['floor']):
@@ -767,12 +778,14 @@ def main():
     # 統計情報
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("物件数", f"{len(df_filtered)} 件")
+        score_count = df_filtered["deal_score"].notna().sum() if not df_filtered.empty else 0
+        st.metric("物件数", f"{len(df_filtered)} 件", delta=f"スコアあり {score_count}件")
     with col2:
         avg_price = df_filtered["asking_price"].mean() / 10000 if not df_filtered.empty else 0
         st.metric("平均価格", f"{avg_price:,.0f} 万円")
     with col3:
-        avg_score = df_filtered["deal_score"].mean() if not df_filtered.empty else 0
+        df_with_score = df_filtered[df_filtered["deal_score"].notna()]
+        avg_score = df_with_score["deal_score"].mean() if not df_with_score.empty else 0
         st.metric("平均スコア", f"{avg_score:+.1f} %")
     with col4:
         bargain = len(df_filtered[df_filtered["deal_score"] > 0]) if not df_filtered.empty else 0
