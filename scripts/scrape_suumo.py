@@ -349,15 +349,34 @@ def parse_property_card(card: BeautifulSoup, default_ward: str) -> Optional[Dict
                 # 最も古い年を築年とする（新しい年はリノベ年の可能性）
                 listing["building_year"] = min(valid_years)
 
-    # 階数
-    floor_match = re.search(r"(\d+)階[/／](\d+)階建", text)
+    # 階数（複数パターンに対応）
+    # パターン1: 「3階/10階建」「3階／10階建」
+    floor_match = re.search(r"(\d+)階\s*[/／]\s*(\d+)階建", text)
     if floor_match:
         listing["floor"] = int(floor_match.group(1))
         listing["total_floors"] = int(floor_match.group(2))
     else:
-        floor_match = re.search(r"(\d+)階", text)
+        # パターン2: 「10階建　3階部分」「10階建の3階」
+        floor_match = re.search(r"(\d+)階建[のて　\s]*(\d+)階", text)
         if floor_match:
-            listing["floor"] = int(floor_match.group(1))
+            listing["total_floors"] = int(floor_match.group(1))
+            listing["floor"] = int(floor_match.group(2))
+        else:
+            # パターン3: 「所在階3階」「所在階:3階」
+            floor_match = re.search(r"所在階\s*[:：]?\s*(\d+)階", text)
+            if floor_match:
+                listing["floor"] = int(floor_match.group(1))
+            else:
+                # パターン4: 「3階部分」（階建の前ではない場所）
+                floor_match = re.search(r"(\d+)階部分", text)
+                if floor_match:
+                    listing["floor"] = int(floor_match.group(1))
+                else:
+                    # パターン5: 単独の「X階」（ただし「X階建」は除外）
+                    floor_matches = re.findall(r"(\d+)階(?!建)", text)
+                    if floor_matches:
+                        # 最初にマッチしたものを採用（通常は所在階）
+                        listing["floor"] = int(floor_matches[0])
 
     return listing if listing.get("suumo_id") else None
 

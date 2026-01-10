@@ -42,6 +42,7 @@ def load_listings() -> pd.DataFrame:
                 station_name, minutes_to_station,
                 asking_price, market_price, deal_score,
                 area, floor_plan, building_year,
+                floor, total_floors,
                 latitude, longitude, suumo_url
             FROM listings
             WHERE status = 'active'
@@ -340,6 +341,7 @@ def render_table(df: pd.DataFrame):
         "価格（安い順）": ("asking_price", True),
         "価格（高い順）": ("asking_price", False),
         "面積（広い順）": ("area", False),
+        "階数（高い順）": ("floor", False),
         "築年（新しい順）": ("building_year", False),
     }
 
@@ -353,7 +355,7 @@ def render_table(df: pd.DataFrame):
     display_df = df_sorted[[
         "ward_name", "property_name", "station_name", "minutes_to_station",
         "asking_price", "market_price", "deal_score", "area", "floor_plan",
-        "building_year", "suumo_url"
+        "floor", "building_year", "suumo_url"
     ]].copy()
 
     # 数値を万円単位に変換（数値のまま）
@@ -375,6 +377,7 @@ def render_table(df: pd.DataFrame):
             "deal_score": st.column_config.NumberColumn("スコア", format="%+.1f%%"),
             "area": st.column_config.NumberColumn("面積", format="%.0f㎡"),
             "floor_plan": st.column_config.TextColumn("間取り"),
+            "floor": st.column_config.NumberColumn("階数", format="%d階"),
             "building_year": st.column_config.NumberColumn("築年", format="%d年"),
             "suumo_url": st.column_config.LinkColumn(
                 "SUUMO",
@@ -391,10 +394,10 @@ def render_table(df: pd.DataFrame):
         csv_df = df_sorted[[
             "ward_name", "property_name", "station_name", "minutes_to_station",
             "asking_price", "market_price", "deal_score", "area", "floor_plan",
-            "building_year", "suumo_url"
+            "floor", "building_year", "suumo_url"
         ]].copy()
         csv_df.columns = ["区", "物件名", "最寄駅", "徒歩(分)", "売出価格(円)",
-                         "相場価格(円)", "スコア(%)", "面積(㎡)", "間取り", "築年", "SUUMO URL"]
+                         "相場価格(円)", "スコア(%)", "面積(㎡)", "間取り", "階数", "築年", "SUUMO URL"]
         csv = csv_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             label="📥 CSV出力",
