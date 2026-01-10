@@ -1,0 +1,99 @@
+name: Weekly Data Update
+
+on:
+  schedule:
+    # 毎週日曜日 03:00 JST (土曜日 18:00 UTC)
+    - cron: '0 18 * * 6'
+  workflow_dispatch:
+    # 手動実行も可能
+
+env:
+  REINFOLIB_API_KEY: ${{ secrets.REINFOLIB_API_KEY }}
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create .env file
+        run: |
+          echo "REINFOLIB_API_KEY=${{ secrets.REINFOLIB_API_KEY }}" > .env
+
+      - name: Run SUUMO Scraper
+        run: |
+          echo "=== SUUMO Scraping Started at $(date) ==="
+          cd scripts && python scrape_suumo.py
+          echo "=== SUUMO Scraping Completed at $(date) ==="
+
+      - name: Fetch Transaction Data from REINFOLIB
+        run: |
+          echo "=== REINFOLIB Fetch Started at $(date) ==="
+          cd scripts && python fetch_reinfolib.py
+          echo "=== REINFOLIB Fetch Completed at $(date) ==="
+
+      - name: Calculate Market Prices
+        run: |
+          echo "=== Market Price Calculation Started at $(date) ==="
+          cd scripts && python calc_market_price.py
+          echo "=== Market Price Calculation Completed at $(date) ==="
+
+      - name: Calculate Deal Scores
+        run: |
+          echo "=== Deal Score Calculation Started at $(date) ==="
+          cd scripts && python calc_deal_score.py
+          echo "=== Deal Score Calculation Completed at $(date) ==="
+
+      - name: Run Geocoding
+        run: |
+          echo "=== Geocoding Started at $(date) ==="
+          cd scripts && python geocode.py
+          echo "=== Geocoding Completed at $(date) ==="
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet data/apartment.db; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No changes detected in database"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Changes detected in database"
+          fi
+
+      - name: Commit and push changes
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/apartment.db
+          git commit -m "chore: weekly data update $(date +'%Y-%m-%d')"
+          git push
+
+      - name: Summary
+        run: |
+          echo "## Weekly Update Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Date**: $(date +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Database size**: $(ls -lh data/apartment.db | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check_changes.outputs.changed }}" == "true" ]; then
+            echo "✅ Database updated and pushed to repository" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No changes detected, skipped commit" >> $GITHUB_STEP_SUMMARY
+          fi
