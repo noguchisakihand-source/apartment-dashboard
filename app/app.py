@@ -52,6 +52,8 @@ def load_listings() -> pd.DataFrame:
                 area_factor, fallback_level, deal_score,
                 area, floor_plan, building_year,
                 floor, total_floors,
+                total_units, management_fee, repair_reserve, structure,
+                pet_allowed, good_view, good_sunlight,
                 latitude, longitude, suumo_url, updated_at
             FROM listings
             WHERE status = 'active'
@@ -330,18 +332,36 @@ def render_map(df: pd.DataFrame):
         floor_info = f"{int(r['floor'])}階" if pd.notna(r['floor']) else ''
         extra_info = ' / '.join(filter(None, [direction, floor_info]))
 
-        return f"""<b>{name}</b><br>
+        # 特徴タグ（ペット可、眺望良好、陽当り良好）
+        tags = []
+        if r.get('pet_allowed'):
+            tags.append("ペット可")
+        if r.get('good_view'):
+            tags.append("眺望良")
+        if r.get('good_sunlight'):
+            tags.append("陽当良")
+        tags_str = ' '.join(tags)
+
+        # 管理費情報
+        fee_info = ""
+        if pd.notna(r.get('management_fee')) and r['management_fee'] > 0:
+            fee_info = f"管理費: {int(r['management_fee']):,}円/月"
+
+        base_text = f"""<b>{name}</b><br>
 価格: {price}<br>
 {market}<br>
 {score}<br>
 {station} {walk}<br>
-{area_info}<br>
-{extra_info}""".strip() if extra_info else f"""<b>{name}</b><br>
-価格: {price}<br>
-{market}<br>
-{score}<br>
-{station} {walk}<br>
-{area_info}""".strip()
+{area_info}"""
+
+        if extra_info:
+            base_text += f"<br>{extra_info}"
+        if tags_str:
+            base_text += f"<br>{tags_str}"
+        if fee_info:
+            base_text += f"<br>{fee_info}"
+
+        return base_text.strip()
 
     df_map["hover_text"] = df_map.apply(build_hover_text, axis=1)
 

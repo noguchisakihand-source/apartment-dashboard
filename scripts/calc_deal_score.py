@@ -4,6 +4,7 @@
 
 ロジック:
 - 補正後相場 = 相場価格 × 駅徒歩補正 × 階数補正 × 向き補正 × 面積補正
+                       × 総戸数補正 × 総階数補正 × ペット可補正 × 眺望補正 × 陽当り補正
 - お買い得スコア = (補正後相場 - 売出価格) / 補正後相場 × 100
 - 正の値 = 相場より安い（お買い得）
 - 負の値 = 相場より高い
@@ -117,6 +118,42 @@ def get_area_factor(area: Optional[float], adjustments: dict) -> float:
     return 1.0
 
 
+def get_total_units_factor(total_units: Optional[int], adjustments: dict) -> float:
+    """総戸数から補正係数を取得"""
+    if total_units is None:
+        return 1.0
+
+    for entry in adjustments.get("total_units", []):
+        if entry["min"] <= total_units <= entry["max"]:
+            return entry["factor"]
+
+    return 1.0
+
+
+def get_total_floors_factor(total_floors: Optional[int], adjustments: dict) -> float:
+    """総階数から補正係数を取得"""
+    if total_floors is None:
+        return 1.0
+
+    for entry in adjustments.get("total_floors", []):
+        if entry["min"] <= total_floors <= entry["max"]:
+            return entry["factor"]
+
+    return 1.0
+
+
+def get_boolean_factor(value: Optional[bool], key: str, adjustments: dict) -> float:
+    """真偽値の補正係数を取得（ペット可、眺望良好、陽当り良好）"""
+    if value is None:
+        return 1.0
+
+    for entry in adjustments.get(key, []):
+        if entry["value"] == value:
+            return entry["factor"]
+
+    return 1.0
+
+
 def calc_deal_score(asking_price: int, adjusted_market_price: int) -> float:
     """
     お買い得スコアを計算
@@ -147,10 +184,11 @@ def update_listing_scores() -> Tuple[int, int, int]:
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # 全アクティブ物件を取得（駅徒歩・階数・向きも含む）
+        # 全アクティブ物件を取得（新規カラムも含む）
         cursor.execute("""
             SELECT id, ward_name, station_name, asking_price, area, building_year,
-                   minutes_to_station, floor, direction
+                   minutes_to_station, floor, direction,
+                   total_units, total_floors, pet_allowed, good_view, good_sunlight
             FROM listings
             WHERE status = 'active'
         """)
@@ -170,6 +208,11 @@ def update_listing_scores() -> Tuple[int, int, int]:
             minutes_to_station = row[6]
             floor = row[7]
             direction = row[8]
+            total_units = row[9]
+            total_floors = row[10]
+            pet_allowed = bool(row[11]) if row[11] is not None else None
+            good_view = bool(row[12]) if row[12] is not None else None
+            good_sunlight = bool(row[13]) if row[13] is not None else None
 
             # 必須データのチェック
             if not asking_price or not area or not building_year:
@@ -185,15 +228,25 @@ def update_listing_scores() -> Tuple[int, int, int]:
                 skipped += 1
                 continue
 
-            # 補正係数を取得
+            # 補正係数を取得（基本4項目）
             walk_factor = get_walk_factor(minutes_to_station, adjustments)
             floor_factor = get_floor_factor(floor, adjustments)
             direction_factor = get_direction_factor(direction, adjustments)
             area_factor = get_area_factor(area, adjustments)
 
-            # 補正後相場を算出
+            # 補正係数を取得（詳細ページ由来5項目）
+            total_units_factor = get_total_units_factor(total_units, adjustments)
+            total_floors_factor = get_total_floors_factor(total_floors, adjustments)
+            pet_factor = get_boolean_factor(pet_allowed, "pet_allowed", adjustments)
+            view_factor = get_boolean_factor(good_view, "good_view", adjustments)
+            sunlight_factor = get_boolean_factor(good_sunlight, "good_sunlight", adjustments)
+
+            # 補正後相場を算出（9項目の補正）
             adjusted_market_price = int(
-                market_price * walk_factor * floor_factor * direction_factor * area_factor
+                market_price
+                * walk_factor * floor_factor * direction_factor * area_factor
+                * total_units_factor * total_floors_factor
+                * pet_factor * view_factor * sunlight_factor
             )
 
             # スコア計算（補正後相場を使用）
@@ -208,13 +261,20 @@ def update_listing_scores() -> Tuple[int, int, int]:
                     floor_factor = ?,
                     direction_factor = ?,
                     area_factor = ?,
+                    total_units_factor = ?,
+                    total_floors_factor = ?,
+                    pet_factor = ?,
+                    view_factor = ?,
+                    sunlight_factor = ?,
                     fallback_level = ?,
                     deal_score = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (market_price, adjusted_market_price, walk_factor, floor_factor,
-                  direction_factor, area_factor, fallback_level,
-                  round(score, 2), listing_id))
+                  direction_factor, area_factor,
+                  total_units_factor, total_floors_factor,
+                  pet_factor, view_factor, sunlight_factor,
+                  fallback_level, round(score, 2), listing_id))
             updated += 1
 
         conn.commit()
@@ -334,6 +394,11 @@ def main():
     print(f"  階数: {len(adjustments.get('floor', []))}段階")
     print(f"  向き: {len(adjustments.get('direction', []))}種類")
     print(f"  面積: {len(adjustments.get('area', []))}段階")
+    print(f"  総戸数: {len(adjustments.get('total_units', []))}段階")
+    print(f"  総階数: {len(adjustments.get('total_floors', []))}段階")
+    print(f"  ペット可: {len(adjustments.get('pet_allowed', []))}種類")
+    print(f"  眺望: {len(adjustments.get('good_view', []))}種類")
+    print(f"  陽当り: {len(adjustments.get('good_sunlight', []))}種類")
     print()
 
     updated, skipped, errors = update_listing_scores()

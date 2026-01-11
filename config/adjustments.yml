@@ -37,3 +37,33 @@ area:
   - { min: 61, max: 70, factor: 1.00 }  # 基準
   - { min: 71, max: 80, factor: 1.02 }
   - { min: 81, max: 999, factor: 1.05 }
+
+# 総戸数補正（大規模マンションほど高い）
+total_units:
+  - { min: 1, max: 49, factor: 0.95 }
+  - { min: 50, max: 99, factor: 1.00 }    # 基準
+  - { min: 100, max: 199, factor: 1.02 }
+  - { min: 200, max: 999, factor: 1.05 }
+
+# 総階数補正（タワマンほど高い）
+total_floors:
+  - { min: 1, max: 4, factor: 0.95 }
+  - { min: 5, max: 10, factor: 1.00 }     # 基準
+  - { min: 11, max: 20, factor: 1.02 }
+  - { min: 21, max: 30, factor: 1.03 }
+  - { min: 31, max: 999, factor: 1.05 }
+
+# ペット可補正
+pet_allowed:
+  - { value: true, factor: 1.02 }
+  - { value: false, factor: 1.00 }
+
+# 眺望良好補正
+good_view:
+  - { value: true, factor: 1.02 }
+  - { value: false, factor: 1.00 }
+
+# 陽当り良好補正
+good_sunlight:
+  - { value: true, factor: 1.02 }
+  - { value: false, factor: 1.00 }
