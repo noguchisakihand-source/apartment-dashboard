@@ -12,12 +12,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from datetime import datetime
+import json
 import os
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit.components.v1 as components
 
 from utils.db import get_connection
 from utils.config import get_target_wards
@@ -30,13 +32,263 @@ st.set_page_config(
     page_title="不動産お買い得ダッシュボード",
     page_icon="🏠",
     layout="wide",
+    initial_sidebar_state="collapsed",  # スマホ時はサイドバー閉じる
 )
+
+# お気に入りキー（localStorage用）
+FAVORITES_KEY = "apartment_favorites"
 
 # セッションステート初期化
 if "favorites" not in st.session_state:
     st.session_state.favorites = set()
 if "compare_list" not in st.session_state:
     st.session_state.compare_list = []
+if "favorites_loaded" not in st.session_state:
+    st.session_state.favorites_loaded = False
+
+
+def inject_mobile_css():
+    """スマホ向けレスポンシブCSSを注入"""
+    st.markdown("""
+    <style>
+    /* ========== モバイル最適化 ========== */
+
+    /* ベーススタイル - タップ領域拡大 */
+    .stButton > button {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    /* スマホ（768px以下） */
+    @media (max-width: 768px) {
+        /* サイドバーを狭く */
+        [data-testid="stSidebar"] {
+            min-width: 280px !important;
+            max-width: 280px !important;
+        }
+
+        /* サイドバー閉じボタン拡大 */
+        [data-testid="stSidebar"] button[kind="header"] {
+            min-height: 48px;
+            min-width: 48px;
+        }
+
+        /* メインコンテンツのパディング調整 */
+        .main .block-container {
+            padding-left: 1rem;
+            padding-right: 1rem;
+            padding-top: 1rem;
+        }
+
+        /* タイトル縮小 */
+        h1 {
+            font-size: 1.5rem !important;
+        }
+
+        /* メトリクス4列→2列 */
+        [data-testid="column"] {
+            flex: 1 1 50% !important;
+            min-width: 45% !important;
+        }
+
+        /* 統計カードのフォントサイズ調整 */
+        [data-testid="stMetricValue"] {
+            font-size: 1.2rem !important;
+        }
+        [data-testid="stMetricDelta"] {
+            font-size: 0.7rem !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 0.8rem !important;
+        }
+
+        /* タブを横スクロール可能に */
+        .stTabs [data-baseweb="tab-list"] {
+            overflow-x: auto;
+            flex-wrap: nowrap;
+            -webkit-overflow-scrolling: touch;
+        }
+        .stTabs [data-baseweb="tab"] {
+            flex-shrink: 0;
+            padding: 0.5rem 1rem;
+            font-size: 0.9rem;
+        }
+
+        /* お気に入り・比較ボタン拡大 */
+        .stButton > button {
+            min-height: 48px !important;
+            min-width: 48px !important;
+            font-size: 1.2rem !important;
+        }
+
+        /* リンクボタン */
+        .stLinkButton > a {
+            min-height: 44px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+
+        /* チェックボックス拡大 */
+        .stCheckbox label {
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+        }
+
+        /* テーブルの物件名を縮小 */
+        [data-testid="stMarkdownContainer"] p {
+            font-size: 0.9rem;
+        }
+
+        /* マップ高さ調整 */
+        .js-plotly-plot {
+            max-height: 400px !important;
+        }
+
+        /* TOP100カードの調整 */
+        .stDivider {
+            margin-top: 0.5rem !important;
+            margin-bottom: 0.5rem !important;
+        }
+
+        /* ページネーション */
+        .stSelectbox {
+            font-size: 0.85rem;
+        }
+
+        /* フィルター折りたたみ時の表示 */
+        [data-testid="stExpander"] summary {
+            font-size: 1rem;
+            font-weight: bold;
+            padding: 0.75rem;
+        }
+    }
+
+    /* タブレット（769px〜1024px） */
+    @media (min-width: 769px) and (max-width: 1024px) {
+        .main .block-container {
+            padding-left: 2rem;
+            padding-right: 2rem;
+        }
+
+        /* 3列表示 */
+        [data-testid="column"] {
+            flex: 1 1 33% !important;
+        }
+    }
+
+    /* ========== 共通スタイル改善 ========== */
+
+    /* お気に入りボタンのホバー効果 */
+    .stButton > button:hover {
+        transform: scale(1.05);
+        transition: transform 0.1s ease;
+    }
+
+    /* フィルターエクスパンダーのスタイル */
+    [data-testid="stExpander"] {
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        margin-bottom: 0.5rem;
+    }
+
+    /* スクロールバースタイル（モバイル） */
+    ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+    }
+    ::-webkit-scrollbar-thumb {
+        background-color: #888;
+        border-radius: 3px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def inject_favorites_loader():
+    """localStorage連携用JavaScript（お気に入り永続化）
+
+    仕組み:
+    1. ページロード時にlocalStorageから読み込み
+    2. セッションステートが空で、localStorageにデータがある場合
+       → クエリパラメータに追加してリダイレクト
+    3. クエリパラメータからセッションステートに復元
+    """
+    # 初回ロードかつお気に入りが空の場合のみ、localStorageチェックスクリプトを注入
+    if not st.session_state.favorites_loaded and len(st.session_state.favorites) == 0:
+        components.html(f"""
+        <script>
+        (function() {{
+            const key = '{FAVORITES_KEY}';
+            const saved = localStorage.getItem(key);
+
+            // 既にクエリパラメータがある場合はスキップ
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('favs')) {{
+                return;
+            }}
+
+            if (saved) {{
+                try {{
+                    const favIds = JSON.parse(saved);
+                    if (Array.isArray(favIds) && favIds.length > 0) {{
+                        // クエリパラメータに追加してリロード
+                        const currentUrl = new URL(window.location.href);
+                        currentUrl.searchParams.set('favs', favIds.join(','));
+                        window.location.replace(currentUrl.toString());
+                    }}
+                }} catch(e) {{
+                    console.error('Failed to parse favorites:', e);
+                }}
+            }}
+        }})();
+        </script>
+        """, height=0)
+
+
+def save_favorites_to_localstorage(favorite_ids):
+    """お気に入りをlocalStorageに保存するスクリプトを注入"""
+    # setに対応するためlist変換
+    fav_list = list(favorite_ids) if favorite_ids else []
+    json_ids = json.dumps(fav_list)
+    components.html(f"""
+    <script>
+    (function() {{
+        const key = '{FAVORITES_KEY}';
+        const favIds = {json_ids};
+        localStorage.setItem(key, JSON.stringify(favIds));
+
+        // URLのクエリパラメータも更新（ブックマーク対応）
+        const currentUrl = new URL(window.location.href);
+        if (favIds.length > 0) {{
+            currentUrl.searchParams.set('favs', favIds.join(','));
+        }} else {{
+            currentUrl.searchParams.delete('favs');
+        }}
+        // ブラウザ履歴を更新（リロードなし）
+        window.history.replaceState({{}}, '', currentUrl.toString());
+    }})();
+    </script>
+    """, height=0)
+
+
+def load_favorites_from_query():
+    """URLクエリパラメータからお気に入りを復元"""
+    if st.session_state.favorites_loaded:
+        return
+
+    query_params = st.query_params
+    if "favs" in query_params:
+        try:
+            fav_str = query_params.get("favs", "")
+            if fav_str:
+                fav_ids = [int(x) for x in fav_str.split(",") if x.strip()]
+                st.session_state.favorites = set(fav_ids)
+        except Exception as e:
+            st.warning(f"お気に入りの復元に失敗しました: {e}")
+
+    st.session_state.favorites_loaded = True
 
 
 @st.cache_data(ttl=300)  # #23: 60秒→300秒
@@ -143,133 +395,139 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 
 
 def render_sidebar(df: pd.DataFrame) -> dict:
-    """サイドバーにフィルターを表示"""
-    st.sidebar.header("フィルター")
+    """サイドバーにフィルターを表示（スマホ対応：折りたたみ式）"""
+    st.sidebar.header("🔍 フィルター")
 
     # お気に入り件数表示 (#14)
     fav_count = len(st.session_state.favorites)
     if fav_count > 0:
-        st.sidebar.info(f"⭐ お気に入り: {fav_count}件")
-
-    # リセットボタン
-    if st.sidebar.button("🔄 フィルターをリセット", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            if key not in ["favorites", "compare_list"]:
-                del st.session_state[key]
-        st.rerun()
+        st.sidebar.success(f"⭐ お気に入り: {fav_count}件")
 
     filters = {}
 
+    # === クイックフィルター（常に表示） ===
     # お気に入りフィルター (#14)
-    filters["favorites_only"] = st.sidebar.checkbox("⭐ お気に入りのみ", value=False)
+    filters["favorites_only"] = st.sidebar.checkbox("⭐ お気に入りのみ表示", value=False)
 
-    # 区選択
-    target_wards = get_target_wards()
-    filters["wards"] = st.sidebar.multiselect(
-        "区",
-        options=target_wards,
-        default=target_wards,
-    )
-
-    # 予算プリセット (#9)
-    st.sidebar.subheader("価格（万円）")
-    preset_col1, preset_col2, preset_col3 = st.sidebar.columns(3)
-    with preset_col1:
-        if st.button("5-7千万", use_container_width=True):
-            st.session_state.price_min = 5000
-            st.session_state.price_max = 7000
-            st.rerun()
-    with preset_col2:
-        if st.button("7-9千万", use_container_width=True):
-            st.session_state.price_min = 7000
-            st.session_state.price_max = 9000
-            st.rerun()
-    with preset_col3:
-        if st.button("9千万+", use_container_width=True):
-            st.session_state.price_min = 9000
-            st.session_state.price_max = 20000
-            st.rerun()
-
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        filters["price_min"] = st.number_input(
-            "最小", min_value=0, value=st.session_state.get("price_min", 5000),
-            step=500, key="price_min_input"
-        )
-    with col2:
-        filters["price_max"] = st.number_input(
-            "最大", min_value=0, value=st.session_state.get("price_max", 15000),
-            step=500, key="price_max_input"
-        )
-
-    # 面積
-    st.sidebar.subheader("面積（㎡）")
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        filters["area_min"] = st.number_input("最小", min_value=0, value=50, step=5, key="area_min")
-    with col2:
-        filters["area_max"] = st.number_input("最大", min_value=0, value=100, step=5, key="area_max")
-
-    # 築年数
-    filters["age_max"] = st.sidebar.slider(
-        "築年数（年以内）",
-        min_value=0,
-        max_value=50,
-        value=30,
-    )
-
-    # 間取り
-    st.sidebar.subheader("間取り")
-    floor_plan_options = ["1LDK", "2LDK", "3LDK", "4LDK+"]
-    filters["floor_plans"] = st.sidebar.multiselect(
-        "間取り",
-        options=floor_plan_options,
-        default=floor_plan_options,
-        label_visibility="collapsed",
-    )
-
-    # 駅徒歩
-    st.sidebar.subheader("駅徒歩")
-    walk_options = {
-        "指定なし": None,
-        "5分以内": 5,
-        "10分以内": 10,
-        "15分以内": 15,
-    }
-    walk_selection = st.sidebar.radio(
-        "駅徒歩",
-        options=list(walk_options.keys()),
-        index=2,
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    filters["walk_max"] = walk_options[walk_selection]
-
-    # 駅名フィルター (#10)
-    st.sidebar.subheader("駅名")
-    station_list = get_station_list()
-    filters["stations"] = st.sidebar.multiselect(
-        "駅名を選択",
-        options=station_list,
-        default=[],
-        label_visibility="collapsed",
-    )
-
-    # スコアフィルター (#11)
-    st.sidebar.subheader("スコア")
+    # スコアフィルター（重要なので上に移動）
     score_options = {
         "全物件": "all",
-        "スコアありのみ": "score_only",
-        "お買い得（>0%）": "bargain",
-        "超お買い得（>20%）": "super_bargain",
+        "スコアあり": "score_only",
+        "お買い得(>0%)": "bargain",
+        "超お買い得(>20%)": "super_bargain",
     }
     score_selection = st.sidebar.radio(
-        "スコア範囲",
+        "スコア絞り込み",
         options=list(score_options.keys()),
         index=0,
-        label_visibility="collapsed",
+        horizontal=True,
     )
     filters["score_filter"] = score_options[score_selection]
+
+    st.sidebar.divider()
+
+    # === 価格フィルター（折りたたみ） ===
+    with st.sidebar.expander("💰 価格", expanded=True):
+        # 予算プリセット (#9)
+        preset_col1, preset_col2, preset_col3 = st.columns(3)
+        with preset_col1:
+            if st.button("5-7千万", use_container_width=True, key="preset1"):
+                st.session_state.price_min = 5000
+                st.session_state.price_max = 7000
+                st.rerun()
+        with preset_col2:
+            if st.button("7-9千万", use_container_width=True, key="preset2"):
+                st.session_state.price_min = 7000
+                st.session_state.price_max = 9000
+                st.rerun()
+        with preset_col3:
+            if st.button("9千万+", use_container_width=True, key="preset3"):
+                st.session_state.price_min = 9000
+                st.session_state.price_max = 20000
+                st.rerun()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            filters["price_min"] = st.number_input(
+                "最小(万)", min_value=0, value=st.session_state.get("price_min", 5000),
+                step=500, key="price_min_input"
+            )
+        with col2:
+            filters["price_max"] = st.number_input(
+                "最大(万)", min_value=0, value=st.session_state.get("price_max", 15000),
+                step=500, key="price_max_input"
+            )
+
+    # === エリアフィルター（折りたたみ） ===
+    with st.sidebar.expander("📍 エリア", expanded=False):
+        # 区選択
+        target_wards = get_target_wards()
+        filters["wards"] = st.multiselect(
+            "区を選択",
+            options=target_wards,
+            default=target_wards,
+        )
+
+        # 駅名フィルター (#10)
+        station_list = get_station_list()
+        filters["stations"] = st.multiselect(
+            "駅名を選択",
+            options=station_list,
+            default=[],
+        )
+
+    # === 物件条件フィルター（折りたたみ） ===
+    with st.sidebar.expander("🏠 物件条件", expanded=False):
+        # 面積
+        st.caption("面積（㎡）")
+        col1, col2 = st.columns(2)
+        with col1:
+            filters["area_min"] = st.number_input("最小", min_value=0, value=50, step=5, key="area_min")
+        with col2:
+            filters["area_max"] = st.number_input("最大", min_value=0, value=100, step=5, key="area_max")
+
+        # 築年数
+        filters["age_max"] = st.slider(
+            "築年数（年以内）",
+            min_value=0,
+            max_value=50,
+            value=30,
+        )
+
+        # 間取り
+        st.caption("間取り")
+        floor_plan_options = ["1LDK", "2LDK", "3LDK", "4LDK+"]
+        filters["floor_plans"] = st.multiselect(
+            "間取り選択",
+            options=floor_plan_options,
+            default=floor_plan_options,
+            label_visibility="collapsed",
+        )
+
+        # 駅徒歩
+        st.caption("駅徒歩")
+        walk_options = {
+            "指定なし": None,
+            "5分": 5,
+            "10分": 10,
+            "15分": 15,
+        }
+        walk_selection = st.radio(
+            "駅徒歩",
+            options=list(walk_options.keys()),
+            index=2,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        filters["walk_max"] = walk_options[walk_selection]
+
+    # リセットボタン
+    st.sidebar.divider()
+    if st.sidebar.button("🔄 フィルターをリセット", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            if key not in ["favorites", "compare_list", "favorites_loaded"]:
+                del st.session_state[key]
+        st.rerun()
 
     return filters
 
@@ -476,13 +734,15 @@ def render_top100(df: pd.DataFrame):
                 st.link_button("SUUMO", row["suumo_url"])
 
         with col5:
-            # #14: お気に入りボタン
+            # #14: お気に入りボタン（localStorage永続化対応）
             is_fav = row["id"] in st.session_state.favorites
-            if st.button("⭐" if is_fav else "☆", key=f"fav_top_{row['id']}"):
+            if st.button("⭐" if is_fav else "☆", key=f"fav_top_{row['id']}", help="お気に入り"):
                 if is_fav:
                     st.session_state.favorites.discard(row["id"])
                 else:
                     st.session_state.favorites.add(row["id"])
+                # localStorageに保存
+                save_favorites_to_localstorage(st.session_state.favorites)
                 st.rerun()
 
         st.divider()
@@ -586,13 +846,15 @@ def render_table(df: pd.DataFrame):
         col1, col2, col3, col4, col5, col6 = st.columns([0.3, 0.3, 3, 1.5, 1, 0.8])
 
         with col1:
-            # #14: お気に入りボタン
+            # #14: お気に入りボタン（localStorage永続化対応）
             is_fav = row["id"] in st.session_state.favorites
-            if st.button("⭐" if is_fav else "☆", key=f"fav_{row['id']}"):
+            if st.button("⭐" if is_fav else "☆", key=f"fav_{row['id']}", help="お気に入り"):
                 if is_fav:
                     st.session_state.favorites.discard(row["id"])
                 else:
                     st.session_state.favorites.add(row["id"])
+                # localStorageに保存
+                save_favorites_to_localstorage(st.session_state.favorites)
                 st.rerun()
 
         with col2:
@@ -806,6 +1068,13 @@ def render_analytics(df: pd.DataFrame):
 
 def main():
     """メイン処理"""
+    # モバイル向けCSS注入
+    inject_mobile_css()
+
+    # お気に入りをlocalStorageから復元（初回のみ）
+    load_favorites_from_query()
+    inject_favorites_loader()
+
     st.title("🏠 不動産お買い得ダッシュボード")
 
     # データ読み込み
