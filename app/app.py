@@ -47,7 +47,8 @@ def load_listings() -> pd.DataFrame:
             SELECT
                 id, property_name, ward_name, address,
                 station_name, minutes_to_station,
-                asking_price, market_price, deal_score,
+                asking_price, market_price, adjusted_market_price,
+                walk_factor, floor_factor, deal_score,
                 area, floor_plan, building_year,
                 floor, total_floors,
                 latitude, longitude, suumo_url, updated_at
@@ -303,7 +304,7 @@ def render_map(df: pd.DataFrame):
             return "不明"
         return f"築{CURRENT_YEAR - int(year)}年"
 
-    # #12: ホバーテキストに駅情報追加
+    # #12: ホバーテキストに駅情報追加、補正後相場も表示
     def build_hover_text(r):
         name = r['property_name'][:30] + ('...' if len(str(r['property_name'])) > 30 else '')
         price = f"{r['asking_price']/10000:,.0f}万円"
@@ -312,7 +313,14 @@ def render_map(df: pd.DataFrame):
         area_info = f"{r['area']:.0f}㎡ / {format_age(r['building_year'])}"
 
         if pd.notna(r['deal_score']):
-            market = f"相場: {r['market_price']/10000:,.0f}万円"
+            # 補正後相場を優先表示
+            adj_price = r['adjusted_market_price'] if pd.notna(r['adjusted_market_price']) else r['market_price']
+            market = f"相場: {adj_price/10000:,.0f}万円"
+            # 補正ありの場合は補正情報を追加
+            if pd.notna(r['adjusted_market_price']) and r['adjusted_market_price'] != r['market_price']:
+                walk_f = r['walk_factor'] if pd.notna(r['walk_factor']) else 1.0
+                floor_f = r['floor_factor'] if pd.notna(r['floor_factor']) else 1.0
+                market += f" (徒歩{walk_f:.2f}×階{floor_f:.2f})"
             score = f"スコア: {r['deal_score']:+.1f}%"
         else:
             market = "相場: -"
@@ -395,7 +403,9 @@ def render_top100(df: pd.DataFrame):
     top10 = top100.head(10)
 
     for i, (_, row) in enumerate(top10.iterrows(), 1):
-        diff = row["market_price"] - row["asking_price"]
+        # 補正後相場を使用
+        adj_price = row["adjusted_market_price"] if pd.notna(row["adjusted_market_price"]) else row["market_price"]
+        diff = adj_price - row["asking_price"]
         diff_str = f"+{diff/10000:,.0f}" if diff > 0 else f"{diff/10000:,.0f}"
 
         if row["deal_score"] >= 10:
@@ -575,7 +585,12 @@ def render_table(df: pd.DataFrame):
         with col4:
             st.markdown(f"**{row['asking_price']/10000:,.0f}万円**")
             if pd.notna(row['market_price']):
-                st.caption(f"相場 {row['market_price']/10000:,.0f}万円")
+                # 補正後相場を表示
+                adj_price = row['adjusted_market_price'] if pd.notna(row['adjusted_market_price']) else row['market_price']
+                if pd.notna(row['adjusted_market_price']) and row['adjusted_market_price'] != row['market_price']:
+                    st.caption(f"相場 {adj_price/10000:,.0f}万円（補正後）")
+                else:
+                    st.caption(f"相場 {row['market_price']/10000:,.0f}万円")
             if pd.notna(row['deal_score']):
                 color = "green" if row['deal_score'] > 0 else "red"
                 st.markdown(f"<span style='color:{color}'>{row['deal_score']:+.1f}%</span>", unsafe_allow_html=True)
@@ -640,7 +655,12 @@ def render_compare(df: pd.DataFrame):
             # 比較項目
             st.metric("価格", f"{row['asking_price']/10000:,.0f}万円")
             if pd.notna(row['market_price']):
-                st.metric("相場価格", f"{row['market_price']/10000:,.0f}万円")
+                # 補正後相場を表示
+                adj_price = row['adjusted_market_price'] if pd.notna(row['adjusted_market_price']) else row['market_price']
+                if pd.notna(row['adjusted_market_price']) and row['adjusted_market_price'] != row['market_price']:
+                    st.metric("相場価格（補正後）", f"{adj_price/10000:,.0f}万円")
+                else:
+                    st.metric("相場価格", f"{row['market_price']/10000:,.0f}万円")
 
             # ㎡単価
             if pd.notna(row['area']) and row['area'] > 0:
