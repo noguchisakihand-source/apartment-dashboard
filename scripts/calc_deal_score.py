@@ -3,7 +3,7 @@
 お買い得スコア計算スクリプト
 
 ロジック:
-- 補正後相場 = 相場価格 × 駅徒歩補正 × 階数補正
+- 補正後相場 = 相場価格 × 駅徒歩補正 × 階数補正 × 向き補正 × 面積補正
 - お買い得スコア = (補正後相場 - 売出価格) / 補正後相場 × 100
 - 正の値 = 相場より安い（お買い得）
 - 負の値 = 相場より高い
@@ -16,7 +16,7 @@ from typing import Optional, List, Tuple
 import yaml
 
 from utils.db import get_connection
-from calc_market_price import get_market_price, get_age_bracket, get_area_bracket
+from calc_market_price import calc_market_price_with_fallback
 
 
 # 設定ファイルのパス
@@ -27,10 +27,10 @@ ADJUSTMENTS_FILE = CONFIG_DIR / "adjustments.yml"
 def load_adjustments() -> dict:
     """補正係数設定を読み込み"""
     if not ADJUSTMENTS_FILE.exists():
-        return {"walk_minutes": [], "floor": []}
+        return {"walk_minutes": [], "floor": [], "direction": [], "area": []}
 
     with open(ADJUSTMENTS_FILE, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {"walk_minutes": [], "floor": []}
+        return yaml.safe_load(f) or {"walk_minutes": [], "floor": [], "direction": [], "area": []}
 
 
 def get_walk_factor(minutes: Optional[int], adjustments: dict) -> float:
@@ -75,6 +75,48 @@ def get_floor_factor(floor: Optional[int], adjustments: dict) -> float:
     return 1.0
 
 
+def get_direction_factor(direction: Optional[str], adjustments: dict) -> float:
+    """
+    向きから補正係数を取得
+
+    Args:
+        direction: 向き（南、北東など。NULLの場合は1.0を返す）
+        adjustments: 補正係数設定
+
+    Returns:
+        補正係数（デフォルト1.0）
+    """
+    if direction is None:
+        return 1.0
+
+    for entry in adjustments.get("direction", []):
+        if entry["value"] == direction:
+            return entry["factor"]
+
+    return 1.0
+
+
+def get_area_factor(area: Optional[float], adjustments: dict) -> float:
+    """
+    面積から補正係数を取得
+
+    Args:
+        area: 面積（㎡。NULLの場合は1.0を返す）
+        adjustments: 補正係数設定
+
+    Returns:
+        補正係数（デフォルト1.0）
+    """
+    if area is None:
+        return 1.0
+
+    for entry in adjustments.get("area", []):
+        if entry["min"] <= area <= entry["max"]:
+            return entry["factor"]
+
+    return 1.0
+
+
 def calc_deal_score(asking_price: int, adjusted_market_price: int) -> float:
     """
     お買い得スコアを計算
@@ -105,10 +147,10 @@ def update_listing_scores() -> Tuple[int, int, int]:
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # 全アクティブ物件を取得（駅徒歩・階数も含む）
+        # 全アクティブ物件を取得（駅徒歩・階数・向きも含む）
         cursor.execute("""
             SELECT id, ward_name, station_name, asking_price, area, building_year,
-                   minutes_to_station, floor
+                   minutes_to_station, floor, direction
             FROM listings
             WHERE status = 'active'
         """)
@@ -127,27 +169,32 @@ def update_listing_scores() -> Tuple[int, int, int]:
             building_year = row[5]
             minutes_to_station = row[6]
             floor = row[7]
+            direction = row[8]
 
             # 必須データのチェック
             if not asking_price or not area or not building_year:
                 skipped += 1
                 continue
 
-            # 相場価格を取得
-            market_price = get_market_price(
+            # フォールバック付きで相場価格を取得
+            market_price, sample_count, fallback_level = calc_market_price_with_fallback(
                 ward_name, station_name, building_year, area
             )
 
-            if not market_price:
+            if not market_price or fallback_level == 5:
                 skipped += 1
                 continue
 
             # 補正係数を取得
             walk_factor = get_walk_factor(minutes_to_station, adjustments)
             floor_factor = get_floor_factor(floor, adjustments)
+            direction_factor = get_direction_factor(direction, adjustments)
+            area_factor = get_area_factor(area, adjustments)
 
             # 補正後相場を算出
-            adjusted_market_price = int(market_price * walk_factor * floor_factor)
+            adjusted_market_price = int(
+                market_price * walk_factor * floor_factor * direction_factor * area_factor
+            )
 
             # スコア計算（補正後相場を使用）
             score = calc_deal_score(asking_price, adjusted_market_price)
@@ -159,10 +206,14 @@ def update_listing_scores() -> Tuple[int, int, int]:
                     adjusted_market_price = ?,
                     walk_factor = ?,
                     floor_factor = ?,
+                    direction_factor = ?,
+                    area_factor = ?,
+                    fallback_level = ?,
                     deal_score = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (market_price, adjusted_market_price, walk_factor, floor_factor,
+                  direction_factor, area_factor, fallback_level,
                   round(score, 2), listing_id))
             updated += 1
 
@@ -187,7 +238,9 @@ def get_listings_by_score(limit: int = 50) -> List[dict]:
                 id, property_name, ward_name, station_name,
                 asking_price, market_price, adjusted_market_price, deal_score,
                 area, floor_plan, building_year, suumo_url,
-                minutes_to_station, floor, walk_factor, floor_factor
+                minutes_to_station, floor, direction,
+                walk_factor, floor_factor, direction_factor, area_factor,
+                fallback_level
             FROM listings
             WHERE status = 'active'
               AND deal_score IS NOT NULL
@@ -199,22 +252,24 @@ def get_listings_by_score(limit: int = 50) -> List[dict]:
             'id', 'property_name', 'ward_name', 'station_name',
             'asking_price', 'market_price', 'adjusted_market_price', 'deal_score',
             'area', 'floor_plan', 'building_year', 'suumo_url',
-            'minutes_to_station', 'floor', 'walk_factor', 'floor_factor'
+            'minutes_to_station', 'floor', 'direction',
+            'walk_factor', 'floor_factor', 'direction_factor', 'area_factor',
+            'fallback_level'
         ]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
 def print_ranking(listings: List[dict]):
     """物件ランキングを表示"""
-    print(f"{'順位':>4} {'スコア':>7} {'売出価格':>12} {'補正後相場':>12} {'差額':>10} {'区':>6} {'徒歩':>4} {'階':>3}")
+    print(f"{'順位':>4} {'スコア':>7} {'売出価格':>12} {'補正後相場':>12} {'差額':>10} {'区':>6} {'向き':>4} {'Lv':>2}")
     print("-" * 80)
 
     for i, l in enumerate(listings, 1):
         adj_price = l.get('adjusted_market_price') or l['market_price']
         diff = adj_price - l['asking_price']
         diff_str = f"+{diff//10000:,}" if diff > 0 else f"{diff//10000:,}"
-        walk = l.get('minutes_to_station') or 0
-        floor = l.get('floor') or 0
+        direction = l.get('direction') or '-'
+        level = l.get('fallback_level') or 0
         print(
             f"{i:>4} "
             f"{l['deal_score']:>6.1f}% "
@@ -222,9 +277,50 @@ def print_ranking(listings: List[dict]):
             f"{adj_price//10000:>10,}万 "
             f"{diff_str:>9}万 "
             f"{l['ward_name']:>6} "
-            f"{walk:>3}分 "
-            f"{floor:>2}階"
+            f"{direction:>4} "
+            f"L{level}"
         )
+
+
+def print_coverage_stats():
+    """カバー率統計を表示"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # 全体のカバー率
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN deal_score IS NOT NULL THEN 1 ELSE 0 END) as scored
+            FROM listings
+            WHERE status = 'active'
+        """)
+        row = cursor.fetchone()
+        total, scored = row[0], row[1]
+        coverage = (scored / total * 100) if total > 0 else 0
+
+        print(f"\n【カバー率】")
+        print(f"  全体: {scored}/{total} ({coverage:.1f}%)")
+
+        # フォールバックレベル別
+        cursor.execute("""
+            SELECT fallback_level, COUNT(*) as cnt
+            FROM listings
+            WHERE status = 'active' AND deal_score IS NOT NULL
+            GROUP BY fallback_level
+            ORDER BY fallback_level
+        """)
+        print(f"\n【フォールバックレベル別】")
+        level_labels = {
+            1: "駅×築年×面積",
+            2: "駅×築年のみ",
+            3: "区×築年×面積",
+            4: "区×築年のみ",
+        }
+        for row in cursor.fetchall():
+            level, cnt = row[0], row[1]
+            label = level_labels.get(level, f"レベル{level}")
+            print(f"  L{level} ({label}): {cnt}件")
 
 
 def main():
@@ -236,6 +332,8 @@ def main():
     print("【補正係数設定】")
     print(f"  駅徒歩: {len(adjustments.get('walk_minutes', []))}段階")
     print(f"  階数: {len(adjustments.get('floor', []))}段階")
+    print(f"  向き: {len(adjustments.get('direction', []))}種類")
+    print(f"  面積: {len(adjustments.get('area', []))}段階")
     print()
 
     updated, skipped, errors = update_listing_scores()
@@ -244,6 +342,9 @@ def main():
     print(f"スキップ: {skipped}件（面積・築年・相場データ不足）")
     if errors:
         print(f"エラー: {errors}件")
+
+    # カバー率統計
+    print_coverage_stats()
 
     if updated > 0:
         print("\n【お買い得ランキング】")

@@ -48,7 +48,8 @@ def load_listings() -> pd.DataFrame:
                 id, property_name, ward_name, address,
                 station_name, minutes_to_station,
                 asking_price, market_price, adjusted_market_price,
-                walk_factor, floor_factor, deal_score,
+                walk_factor, floor_factor, direction, direction_factor,
+                area_factor, fallback_level, deal_score,
                 area, floor_plan, building_year,
                 floor, total_floors,
                 latitude, longitude, suumo_url, updated_at
@@ -310,23 +311,32 @@ def render_map(df: pd.DataFrame):
         price = f"{r['asking_price']/10000:,.0f}万円"
         station = r['station_name'] or '駅不明'
         walk = f"徒歩{int(r['minutes_to_station'])}分" if pd.notna(r['minutes_to_station']) else ''
+        direction = r['direction'] if pd.notna(r['direction']) else ''
         area_info = f"{r['area']:.0f}㎡ / {format_age(r['building_year'])}"
 
         if pd.notna(r['deal_score']):
             # 補正後相場を優先表示
             adj_price = r['adjusted_market_price'] if pd.notna(r['adjusted_market_price']) else r['market_price']
             market = f"相場: {adj_price/10000:,.0f}万円"
-            # 補正ありの場合は補正情報を追加
-            if pd.notna(r['adjusted_market_price']) and r['adjusted_market_price'] != r['market_price']:
-                walk_f = r['walk_factor'] if pd.notna(r['walk_factor']) else 1.0
-                floor_f = r['floor_factor'] if pd.notna(r['floor_factor']) else 1.0
-                market += f" (徒歩{walk_f:.2f}×階{floor_f:.2f})"
+            # フォールバックレベル表示
+            level = int(r['fallback_level']) if pd.notna(r['fallback_level']) else 0
+            market += f" (L{level})"
             score = f"スコア: {r['deal_score']:+.1f}%"
         else:
             market = "相場: -"
             score = "スコア: 未算出"
 
+        # 向き・階数情報
+        floor_info = f"{int(r['floor'])}階" if pd.notna(r['floor']) else ''
+        extra_info = ' / '.join(filter(None, [direction, floor_info]))
+
         return f"""<b>{name}</b><br>
+価格: {price}<br>
+{market}<br>
+{score}<br>
+{station} {walk}<br>
+{area_info}<br>
+{extra_info}""".strip() if extra_info else f"""<b>{name}</b><br>
 価格: {price}<br>
 {market}<br>
 {score}<br>
@@ -425,7 +435,8 @@ def render_top100(df: pd.DataFrame):
             # #19: 築年表示形式変更
             age = CURRENT_YEAR - row['building_year'] if pd.notna(row['building_year']) else '?'
             station_info = f"{row['station_name']} 徒歩{int(row['minutes_to_station'])}分" if pd.notna(row['station_name']) else ""
-            st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / 築{age}年 / {station_info}")
+            direction = f" / {row['direction']}" if pd.notna(row['direction']) else ""
+            st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / 築{age}年{direction} / {station_info}")
 
         with col3:
             st.metric(
@@ -580,7 +591,8 @@ def render_table(df: pd.DataFrame):
         with col3:
             st.markdown(f"**{row['property_name'][:35]}**")
             station_info = f"{row['station_name']} 徒歩{int(row['minutes_to_station'])}分" if pd.notna(row['station_name']) else ""
-            st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / {format_building_age(row['building_year'])} / {station_info}")
+            direction = f" / {row['direction']}" if pd.notna(row['direction']) else ""
+            st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / {format_building_age(row['building_year'])}{direction} / {station_info}")
 
         with col4:
             st.markdown(f"**{row['asking_price']/10000:,.0f}万円**")

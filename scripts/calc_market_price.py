@@ -4,8 +4,15 @@
 
 ロジック:
 1. 駅×築年数帯×面積帯で㎡単価の中央値を算出
-2. サンプル数が20件未満の場合は区単位にフォールバック
+2. フォールバック戦略で段階的に条件を緩和
 3. 結果をmarket_pricesテーブルに保存
+
+フォールバック優先度:
+1. 駅×築年数×面積 (min_samples=20)
+2. 駅×築年数のみ (min_samples=15)
+3. 区×築年数×面積 (min_samples=10)
+4. 区×築年数のみ (min_samples=5)
+5. 算出不可
 """
 
 import statistics
@@ -39,16 +46,159 @@ def get_area_bracket(area: Optional[float]) -> Optional[str]:
     if area is None:
         return None
 
-    if area < 50:
+    if area < 40:
         return None  # 対象外
+    elif area <= 50:
+        return "40-50"
     elif area <= 60:
-        return "50-60"
+        return "51-60"
     elif area <= 70:
         return "61-70"
     elif area <= 80:
         return "71-80"
     else:
         return "81+"
+
+
+def get_age_range(age_bracket: str) -> Tuple[int, int]:
+    """築年数帯から築年範囲を取得"""
+    current_year = datetime.now().year
+    if age_bracket == "0-10":
+        min_age, max_age = 0, 10
+    elif age_bracket == "11-20":
+        min_age, max_age = 11, 20
+    elif age_bracket == "21-30":
+        min_age, max_age = 21, 30
+    else:  # 31+
+        min_age, max_age = 31, 100
+
+    min_year = current_year - max_age
+    max_year = current_year - min_age
+    return min_year, max_year
+
+
+def get_area_range(area_bracket: str) -> Tuple[float, float]:
+    """面積帯から面積範囲を取得"""
+    if area_bracket == "40-50":
+        return 40, 50
+    elif area_bracket == "51-60":
+        return 51, 60
+    elif area_bracket == "61-70":
+        return 61, 70
+    elif area_bracket == "71-80":
+        return 71, 80
+    else:  # 81+
+        return 81, 999
+
+
+def query_unit_prices(
+    cursor,
+    ward_name: str,
+    station_name: Optional[str],
+    min_year: int,
+    max_year: int,
+    min_area: Optional[float] = None,
+    max_area: Optional[float] = None
+) -> List[int]:
+    """成約データから㎡単価を取得"""
+    if station_name and min_area is not None:
+        # 駅×築年数×面積
+        cursor.execute("""
+            SELECT unit_price FROM transactions
+            WHERE ward_name = ?
+              AND station_name = ?
+              AND building_year BETWEEN ? AND ?
+              AND area BETWEEN ? AND ?
+              AND unit_price IS NOT NULL
+        """, (ward_name, station_name, min_year, max_year, min_area, max_area))
+    elif station_name:
+        # 駅×築年数のみ
+        cursor.execute("""
+            SELECT unit_price FROM transactions
+            WHERE ward_name = ?
+              AND station_name = ?
+              AND building_year BETWEEN ? AND ?
+              AND unit_price IS NOT NULL
+        """, (ward_name, station_name, min_year, max_year))
+    elif min_area is not None:
+        # 区×築年数×面積
+        cursor.execute("""
+            SELECT unit_price FROM transactions
+            WHERE ward_name = ?
+              AND building_year BETWEEN ? AND ?
+              AND area BETWEEN ? AND ?
+              AND unit_price IS NOT NULL
+        """, (ward_name, min_year, max_year, min_area, max_area))
+    else:
+        # 区×築年数のみ
+        cursor.execute("""
+            SELECT unit_price FROM transactions
+            WHERE ward_name = ?
+              AND building_year BETWEEN ? AND ?
+              AND unit_price IS NOT NULL
+        """, (ward_name, min_year, max_year))
+
+    return [row[0] for row in cursor.fetchall()]
+
+
+def calc_market_price_with_fallback(
+    ward_name: str,
+    station_name: Optional[str],
+    building_year: Optional[int],
+    area: Optional[float]
+) -> Tuple[Optional[int], int, int]:
+    """
+    フォールバック戦略で相場価格を算出
+
+    Returns:
+        (相場価格, サンプル数, フォールバックレベル)
+        フォールバックレベル: 1=駅×築年×面積, 2=駅×築年, 3=区×築年×面積, 4=区×築年, 5=算出不可
+    """
+    age_bracket = get_age_bracket(building_year)
+    area_bracket = get_area_bracket(area)
+
+    if not age_bracket:
+        return None, 0, 5
+
+    min_year, max_year = get_age_range(age_bracket)
+
+    if area_bracket:
+        min_area, max_area = get_area_range(area_bracket)
+    else:
+        min_area, max_area = None, None
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # レベル1: 駅×築年数×面積 (min_samples=20)
+        if station_name and area_bracket:
+            prices = query_unit_prices(cursor, ward_name, station_name, min_year, max_year, min_area, max_area)
+            if len(prices) >= 20:
+                median = int(statistics.median(prices))
+                return int(median * area), len(prices), 1
+
+        # レベル2: 駅×築年数のみ (min_samples=15)
+        if station_name:
+            prices = query_unit_prices(cursor, ward_name, station_name, min_year, max_year)
+            if len(prices) >= 15:
+                median = int(statistics.median(prices))
+                return int(median * area), len(prices), 2
+
+        # レベル3: 区×築年数×面積 (min_samples=10)
+        if area_bracket:
+            prices = query_unit_prices(cursor, ward_name, None, min_year, max_year, min_area, max_area)
+            if len(prices) >= 10:
+                median = int(statistics.median(prices))
+                return int(median * area), len(prices), 3
+
+        # レベル4: 区×築年数のみ (min_samples=5)
+        prices = query_unit_prices(cursor, ward_name, None, min_year, max_year)
+        if len(prices) >= 5:
+            median = int(statistics.median(prices))
+            return int(median * area), len(prices), 4
+
+        # レベル5: 算出不可
+        return None, len(prices), 5
 
 
 def calc_median_unit_price(
@@ -59,70 +209,30 @@ def calc_median_unit_price(
     min_sample_count: int = 20
 ) -> Tuple[Optional[int], int, bool]:
     """
-    指定条件での㎡単価中央値を算出
+    指定条件での㎡単価中央値を算出（従来のAPI互換）
 
     Returns:
         (中央値, サンプル数, 区単位フォールバックしたか)
     """
+    min_year, max_year = get_age_range(age_bracket)
+    min_area, max_area = get_area_range(area_bracket)
+
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # 築年数帯の範囲を取得
-        if age_bracket == "0-10":
-            min_age, max_age = 0, 10
-        elif age_bracket == "11-20":
-            min_age, max_age = 11, 20
-        elif age_bracket == "21-30":
-            min_age, max_age = 21, 30
-        else:  # 31+
-            min_age, max_age = 31, 100
-
-        current_year = datetime.now().year
-        min_year = current_year - max_age
-        max_year = current_year - min_age
-
-        # 面積帯の範囲を取得
-        if area_bracket == "50-60":
-            min_area, max_area = 50, 60
-        elif area_bracket == "61-70":
-            min_area, max_area = 61, 70
-        elif area_bracket == "71-80":
-            min_area, max_area = 71, 80
-        else:  # 81+
-            min_area, max_area = 81, 999
-
         # 駅単位で検索（駅情報がある場合）
         if station_name:
-            cursor.execute("""
-                SELECT unit_price FROM transactions
-                WHERE ward_name = ?
-                  AND station_name = ?
-                  AND building_year BETWEEN ? AND ?
-                  AND area BETWEEN ? AND ?
-                  AND unit_price IS NOT NULL
-            """, (ward_name, station_name, min_year, max_year, min_area, max_area))
-            rows = cursor.fetchall()
-
-            if len(rows) >= min_sample_count:
-                prices = [row[0] for row in rows]
-                return int(statistics.median(prices)), len(rows), False
+            prices = query_unit_prices(cursor, ward_name, station_name, min_year, max_year, min_area, max_area)
+            if len(prices) >= min_sample_count:
+                return int(statistics.median(prices)), len(prices), False
 
         # 区単位にフォールバック
-        cursor.execute("""
-            SELECT unit_price FROM transactions
-            WHERE ward_name = ?
-              AND building_year BETWEEN ? AND ?
-              AND area BETWEEN ? AND ?
-              AND unit_price IS NOT NULL
-        """, (ward_name, min_year, max_year, min_area, max_area))
-        rows = cursor.fetchall()
-
-        if len(rows) >= min_sample_count:
-            prices = [row[0] for row in rows]
-            return int(statistics.median(prices)), len(rows), True
+        prices = query_unit_prices(cursor, ward_name, None, min_year, max_year, min_area, max_area)
+        if len(prices) >= min_sample_count:
+            return int(statistics.median(prices)), len(prices), True
 
         # サンプル数不足
-        return None, len(rows), True
+        return None, len(prices), True
 
 
 def save_market_prices(results: List[dict]):
@@ -160,7 +270,7 @@ def get_market_price(
     area: Optional[float]
 ) -> Optional[int]:
     """
-    物件の相場価格を取得
+    物件の相場価格を取得（従来のAPI互換）
 
     Args:
         ward_name: 区名
@@ -171,45 +281,16 @@ def get_market_price(
     Returns:
         相場価格（円）、算出不可の場合はNone
     """
-    age_bracket = get_age_bracket(building_year)
-    area_bracket = get_area_bracket(area)
-
-    if not age_bracket or not area_bracket:
-        return None
-
-    with get_connection() as conn:
-        cursor = conn.cursor()
-
-        # 駅単位で検索
-        if station_name:
-            cursor.execute("""
-                SELECT median_unit_price FROM market_prices
-                WHERE ward_name = ? AND station_name = ?
-                  AND age_bracket = ? AND area_bracket = ?
-            """, (ward_name, station_name, age_bracket, area_bracket))
-            row = cursor.fetchone()
-            if row and row[0]:
-                return int(row[0] * area)
-
-        # 区単位で検索
-        cursor.execute("""
-            SELECT median_unit_price FROM market_prices
-            WHERE ward_name = ? AND station_name IS NULL
-              AND age_bracket = ? AND area_bracket = ?
-        """, (ward_name, age_bracket, area_bracket))
-        row = cursor.fetchone()
-        if row and row[0]:
-            return int(row[0] * area)
-
-        return None
+    price, _, level = calc_market_price_with_fallback(ward_name, station_name, building_year, area)
+    return price
 
 
 def main():
     """メイン処理: 全区×全築年数帯×全面積帯の相場を算出"""
     config = get_market_config()
-    min_sample_count = config.get("min_sample_count", 20)
+    min_sample_count = config.get("min_sample_count", 10)  # 緩和
     age_brackets = config.get("age_brackets", ["0-10", "11-20", "21-30", "31+"])
-    area_brackets = config.get("area_brackets", ["50-60", "61-70", "71-80", "81+"])
+    area_brackets = config.get("area_brackets", ["40-50", "51-60", "61-70", "71-80", "81+"])
 
     # 対象区を取得
     with get_connection() as conn:

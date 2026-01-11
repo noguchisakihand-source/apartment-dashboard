@@ -1,5 +1,5 @@
 # 相場補正係数設定
-# 駅徒歩・階数に応じて相場価格を補正する
+# 駅徒歩・階数・向き・面積に応じて相場価格を補正する
 
 # 駅徒歩補正（4-5分を基準=1.00）
 walk_minutes:
@@ -17,3 +17,23 @@ floor:
   - { min: 3, max: 5, factor: 1.00 }    # 基準
   - { min: 6, max: 10, factor: 1.02 }
   - { min: 11, max: 999, factor: 1.05 } # 高層
+
+# 向き補正（南向きを基準プレミアム）
+direction:
+  - { value: "南", factor: 1.05 }
+  - { value: "南東", factor: 1.03 }
+  - { value: "南西", factor: 1.03 }
+  - { value: "東", factor: 1.01 }
+  - { value: "西", factor: 0.98 }
+  - { value: "北東", factor: 0.97 }
+  - { value: "北西", factor: 0.97 }
+  - { value: "北", factor: 0.95 }
+  # NULLまたは不明の場合は1.0（補正なし）
+
+# 面積補正（61-70㎡を基準=1.00）
+area:
+  - { min: 40, max: 50, factor: 0.95 }
+  - { min: 51, max: 60, factor: 0.98 }
+  - { min: 61, max: 70, factor: 1.00 }  # 基準
+  - { min: 71, max: 80, factor: 1.02 }
+  - { min: 81, max: 999, factor: 1.05 }

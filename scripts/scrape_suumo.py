@@ -233,6 +233,30 @@ def parse_floor_info(floor_str: str) -> Tuple[Optional[int], Optional[int]]:
     return None, None
 
 
+def parse_direction(text: str) -> Optional[str]:
+    """向き（方角）をパース"""
+    if not text:
+        return None
+
+    # 向きパターン（優先度順）
+    # パターン1: 「南向き」「南東向き」など
+    direction_match = re.search(r"(南西|南東|北西|北東|南|北|東|西)向き", text)
+    if direction_match:
+        return direction_match.group(1)
+
+    # パターン2: 「向き:南」「向き：南東」など
+    direction_match = re.search(r"向き\s*[:：]\s*(南西|南東|北西|北東|南|北|東|西)", text)
+    if direction_match:
+        return direction_match.group(1)
+
+    # パターン3: 「バルコニー南向き」「バルコニー：南」など
+    direction_match = re.search(r"バルコニー\s*[:：]?\s*(南西|南東|北西|北東|南|北|東|西)", text)
+    if direction_match:
+        return direction_match.group(1)
+
+    return None
+
+
 def generate_suumo_id(url: str) -> str:
     """URLからユニークIDを生成"""
     # nc_XXXXX/ 形式を抽出（URLパス内）
@@ -390,6 +414,9 @@ def parse_property_card(card: BeautifulSoup, default_ward: str) -> Optional[Dict
                         # 最初にマッチしたものを採用（通常は所在階）
                         listing["floor"] = int(floor_matches[0])
 
+    # 向き（方角）
+    listing["direction"] = parse_direction(text)
+
     return listing if listing.get("suumo_id") else None
 
 
@@ -470,14 +497,15 @@ def save_listings(listings: List[Dict]) -> int:
                         suumo_id, property_name, ward_name, address,
                         station_name, minutes_to_station, asking_price,
                         area, floor_plan, building_year, floor, total_floors,
-                        suumo_url, status, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                        direction, suumo_url, status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
                     ON CONFLICT(suumo_id) DO UPDATE SET
                         asking_price = excluded.asking_price,
                         station_name = COALESCE(excluded.station_name, station_name),
                         minutes_to_station = COALESCE(excluded.minutes_to_station, minutes_to_station),
                         floor = COALESCE(excluded.floor, floor),
                         total_floors = COALESCE(excluded.total_floors, total_floors),
+                        direction = COALESCE(excluded.direction, direction),
                         status = 'active',
                         updated_at = excluded.updated_at
                 """, (
@@ -493,6 +521,7 @@ def save_listings(listings: List[Dict]) -> int:
                     listing.get("building_year"),
                     listing.get("floor"),
                     listing.get("total_floors"),
+                    listing.get("direction"),
                     listing.get("suumo_url"),
                     now,
                 ))
