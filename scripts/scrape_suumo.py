@@ -478,12 +478,27 @@ def scrape_ward(ward_name: str, max_pages: int = 3) -> List[Dict]:
     return all_listings
 
 
-def save_listings(listings: List[Dict]) -> int:
-    """物件をDBに保存"""
-    if not listings:
-        return 0
+def save_listings(listings: List[Dict]) -> Dict:
+    """
+    物件をDBに保存（価格変動検知付き）
 
-    saved_count = 0
+    Returns:
+        Dict: {
+            "saved": int,
+            "new": int,
+            "price_changed": int,
+            "price_drops": List[Dict]  # 値下げ物件のリスト
+        }
+    """
+    if not listings:
+        return {"saved": 0, "new": 0, "price_changed": 0, "price_drops": []}
+
+    result = {
+        "saved": 0,
+        "new": 0,
+        "price_changed": 0,
+        "price_drops": [],
+    }
     now = datetime.now().isoformat()
 
     with get_connection() as conn:
@@ -491,48 +506,172 @@ def save_listings(listings: List[Dict]) -> int:
 
         for listing in listings:
             try:
-                # UPSERT（INSERT OR REPLACE）
+                suumo_id = listing.get("suumo_id")
+                new_price = listing.get("asking_price")
+
+                # 既存物件を確認
                 cursor.execute("""
-                    INSERT INTO listings (
-                        suumo_id, property_name, ward_name, address,
-                        station_name, minutes_to_station, asking_price,
-                        area, floor_plan, building_year, floor, total_floors,
-                        direction, suumo_url, status, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
-                    ON CONFLICT(suumo_id) DO UPDATE SET
-                        asking_price = excluded.asking_price,
-                        station_name = COALESCE(excluded.station_name, station_name),
-                        minutes_to_station = COALESCE(excluded.minutes_to_station, minutes_to_station),
-                        floor = COALESCE(excluded.floor, floor),
-                        total_floors = COALESCE(excluded.total_floors, total_floors),
-                        direction = COALESCE(excluded.direction, direction),
-                        status = 'active',
-                        updated_at = excluded.updated_at
-                """, (
-                    listing.get("suumo_id"),
-                    listing.get("property_name"),
-                    listing.get("ward_name"),
-                    listing.get("address"),
-                    listing.get("station_name"),
-                    listing.get("minutes_to_station"),
-                    listing.get("asking_price"),
-                    listing.get("area"),
-                    listing.get("floor_plan"),
-                    listing.get("building_year"),
-                    listing.get("floor"),
-                    listing.get("total_floors"),
-                    listing.get("direction"),
-                    listing.get("suumo_url"),
-                    now,
-                ))
-                saved_count += 1
+                    SELECT id, asking_price, property_name, ward_name
+                    FROM listings WHERE suumo_id = ?
+                """, (suumo_id,))
+                existing = cursor.fetchone()
+
+                if existing:
+                    # 既存物件: 価格変動チェック
+                    listing_id, old_price, prop_name, ward = existing
+
+                    if old_price and new_price and old_price != new_price:
+                        # 価格変動あり → price_history に記録
+                        cursor.execute("""
+                            INSERT INTO price_history (listing_id, price, recorded_at)
+                            VALUES (?, ?, ?)
+                        """, (listing_id, old_price, now))
+
+                        # 値下げの場合は記録
+                        if new_price < old_price:
+                            price_diff = old_price - new_price
+                            price_diff_pct = (price_diff / old_price) * 100
+                            result["price_drops"].append({
+                                "property_name": prop_name,
+                                "ward_name": ward,
+                                "old_price": old_price,
+                                "new_price": new_price,
+                                "diff": price_diff,
+                                "diff_pct": price_diff_pct,
+                            })
+
+                        result["price_changed"] += 1
+
+                        # UPDATE（価格変動あり）
+                        cursor.execute("""
+                            UPDATE listings SET
+                                asking_price = ?,
+                                previous_price = ?,
+                                price_changed_at = ?,
+                                station_name = COALESCE(?, station_name),
+                                minutes_to_station = COALESCE(?, minutes_to_station),
+                                floor = COALESCE(?, floor),
+                                total_floors = COALESCE(?, total_floors),
+                                direction = COALESCE(?, direction),
+                                status = 'active',
+                                last_seen_at = ?,
+                                updated_at = ?
+                            WHERE suumo_id = ?
+                        """, (
+                            new_price,
+                            old_price,
+                            now,
+                            listing.get("station_name"),
+                            listing.get("minutes_to_station"),
+                            listing.get("floor"),
+                            listing.get("total_floors"),
+                            listing.get("direction"),
+                            now,
+                            now,
+                            suumo_id,
+                        ))
+                    else:
+                        # 価格変動なし: last_seen_at のみ更新
+                        cursor.execute("""
+                            UPDATE listings SET
+                                station_name = COALESCE(?, station_name),
+                                minutes_to_station = COALESCE(?, minutes_to_station),
+                                floor = COALESCE(?, floor),
+                                total_floors = COALESCE(?, total_floors),
+                                direction = COALESCE(?, direction),
+                                status = 'active',
+                                last_seen_at = ?,
+                                updated_at = ?
+                            WHERE suumo_id = ?
+                        """, (
+                            listing.get("station_name"),
+                            listing.get("minutes_to_station"),
+                            listing.get("floor"),
+                            listing.get("total_floors"),
+                            listing.get("direction"),
+                            now,
+                            now,
+                            suumo_id,
+                        ))
+                else:
+                    # 新規物件
+                    cursor.execute("""
+                        INSERT INTO listings (
+                            suumo_id, property_name, ward_name, address,
+                            station_name, minutes_to_station, asking_price,
+                            area, floor_plan, building_year, floor, total_floors,
+                            direction, suumo_url, status,
+                            first_seen_at, last_seen_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                    """, (
+                        suumo_id,
+                        listing.get("property_name"),
+                        listing.get("ward_name"),
+                        listing.get("address"),
+                        listing.get("station_name"),
+                        listing.get("minutes_to_station"),
+                        new_price,
+                        listing.get("area"),
+                        listing.get("floor_plan"),
+                        listing.get("building_year"),
+                        listing.get("floor"),
+                        listing.get("total_floors"),
+                        listing.get("direction"),
+                        listing.get("suumo_url"),
+                        now,
+                        now,
+                        now,
+                    ))
+                    result["new"] += 1
+
+                result["saved"] += 1
+
             except Exception as e:
                 print(f"  保存エラー: {e}")
                 continue
 
         conn.commit()
 
-    return saved_count
+    return result
+
+
+def mark_sold_listings(scraped_suumo_ids: set) -> int:
+    """
+    今回のスクレイピングで見つからなかった物件を sold にマーク
+
+    Args:
+        scraped_suumo_ids: 今回スクレイピングで見つかった suumo_id のセット
+
+    Returns:
+        int: sold にマークした件数
+    """
+    now = datetime.now().isoformat()
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # アクティブな物件を取得
+        cursor.execute("""
+            SELECT suumo_id FROM listings
+            WHERE status = 'active' AND source = 'suumo'
+        """)
+        active_ids = {row[0] for row in cursor.fetchall()}
+
+        # 今回見つからなかった物件
+        missing_ids = active_ids - scraped_suumo_ids
+
+        if missing_ids:
+            # sold にマーク
+            placeholders = ",".join("?" * len(missing_ids))
+            cursor.execute(f"""
+                UPDATE listings
+                SET status = 'sold', last_seen_at = ?
+                WHERE suumo_id IN ({placeholders})
+            """, [now] + list(missing_ids))
+
+            conn.commit()
+
+        return len(missing_ids)
 
 
 def scrape_all_wards(max_pages_per_ward: int = 3) -> Dict:
@@ -543,6 +682,10 @@ def scrape_all_wards(max_pages_per_ward: int = 3) -> Dict:
     results = {
         "total_scraped": 0,
         "total_saved": 0,
+        "total_new": 0,
+        "total_price_changed": 0,
+        "all_price_drops": [],
+        "all_suumo_ids": set(),
         "by_ward": {},
     }
 
@@ -550,16 +693,28 @@ def scrape_all_wards(max_pages_per_ward: int = 3) -> Dict:
         print(f"\n=== {ward_name} ===")
 
         listings = scrape_ward(ward_name, max_pages=max_pages_per_ward)
-        saved = save_listings(listings)
+        save_result = save_listings(listings)
+
+        # 今回取得した suumo_id を記録
+        for listing in listings:
+            if listing.get("suumo_id"):
+                results["all_suumo_ids"].add(listing["suumo_id"])
 
         results["total_scraped"] += len(listings)
-        results["total_saved"] += saved
+        results["total_saved"] += save_result["saved"]
+        results["total_new"] += save_result["new"]
+        results["total_price_changed"] += save_result["price_changed"]
+        results["all_price_drops"].extend(save_result["price_drops"])
         results["by_ward"][ward_name] = {
             "scraped": len(listings),
-            "saved": saved,
+            "saved": save_result["saved"],
+            "new": save_result["new"],
+            "price_changed": save_result["price_changed"],
         }
 
-        print(f"  合計: {len(listings)}件取得, {saved}件保存")
+        new_str = f", 新着{save_result['new']}件" if save_result["new"] else ""
+        price_str = f", 価格変動{save_result['price_changed']}件" if save_result["price_changed"] else ""
+        print(f"  合計: {len(listings)}件取得, {save_result['saved']}件保存{new_str}{price_str}")
 
         # 区間で待機
         time.sleep(3)
@@ -575,10 +730,27 @@ def main():
     # 本番実行: 各地域50ページ（最大1000件/地域）
     results = scrape_all_wards(max_pages_per_ward=50)
 
+    # 掲載終了物件を検知
+    print("\n=== 掲載終了検知 ===")
+    sold_count = mark_sold_listings(results["all_suumo_ids"])
+    print(f"掲載終了: {sold_count}件")
+
     print("\n=== 結果サマリー ===")
     print(f"総取得件数: {results['total_scraped']}")
     print(f"総保存件数: {results['total_saved']}")
+    print(f"新着物件: {results['total_new']}件")
+    print(f"価格変動: {results['total_price_changed']}件")
+    print(f"掲載終了: {sold_count}件")
 
+    # 値下げ物件があれば表示
+    if results["all_price_drops"]:
+        print(f"\n=== 値下げ物件 ({len(results['all_price_drops'])}件) ===")
+        for drop in results["all_price_drops"][:10]:  # 最大10件表示
+            diff_man = drop["diff"] // 10000
+            print(f"  {drop['ward_name']} {drop['property_name'][:20]}: "
+                  f"-{diff_man}万円 ({drop['diff_pct']:.1f}%)")
+
+    print("\n地域別:")
     for ward, data in results["by_ward"].items():
         print(f"  {ward}: {data['scraped']}件")
 

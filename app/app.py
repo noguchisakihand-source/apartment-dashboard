@@ -463,7 +463,7 @@ def update_url_with_filters(filters: dict):
         del current_params["area_max"]
 
     # 築年数
-    if filters.get("age_max") and filters["age_max"] != 30:
+    if filters.get("age_max") and filters["age_max"] != 40:
         current_params["age_max"] = str(filters["age_max"])
     elif "age_max" in current_params:
         del current_params["age_max"]
@@ -476,7 +476,7 @@ def update_url_with_filters(filters: dict):
         del current_params["layouts"]
 
     # 駅徒歩
-    if filters.get("walk_max") and filters["walk_max"] != 10:
+    if filters.get("walk_max") and filters["walk_max"] != 15:
         current_params["walk_max"] = str(filters["walk_max"])
     elif "walk_max" in current_params:
         del current_params["walk_max"]
@@ -514,13 +514,63 @@ def load_listings() -> pd.DataFrame:
                 floor, total_floors,
                 total_units, management_fee, repair_reserve, structure,
                 pet_allowed, good_view, good_sunlight,
-                latitude, longitude, suumo_url, updated_at
+                latitude, longitude, suumo_url, updated_at,
+                first_seen_at, last_seen_at, price_changed_at, previous_price
             FROM listings
             WHERE status = 'active'
         """, conn)
 
     # 通勤時間データを結合
     df = merge_commute_times(df)
+
+    # 新着・値下げフラグを追加
+    df = add_price_tracking_flags(df)
+
+    return df
+
+
+def add_price_tracking_flags(df: pd.DataFrame) -> pd.DataFrame:
+    """新着・値下げフラグを追加"""
+    from datetime import timedelta
+
+    now = datetime.now()
+    seven_days_ago = now - timedelta(days=7)
+
+    def is_new(first_seen):
+        if pd.isna(first_seen):
+            return False
+        try:
+            seen_date = pd.to_datetime(first_seen)
+            return seen_date >= seven_days_ago
+        except:
+            return False
+
+    def is_price_dropped(row):
+        if pd.isna(row.get('price_changed_at')) or pd.isna(row.get('previous_price')):
+            return False
+        try:
+            changed_date = pd.to_datetime(row['price_changed_at'])
+            if changed_date < seven_days_ago:
+                return False
+            # 値下げ（前回価格より安くなった）
+            return row['asking_price'] < row['previous_price']
+        except:
+            return False
+
+    df['is_new'] = df['first_seen_at'].apply(is_new)
+    df['is_price_dropped'] = df.apply(is_price_dropped, axis=1)
+
+    # 値下げ額・率を計算
+    def calc_price_drop(row):
+        if not row['is_price_dropped']:
+            return None, None
+        diff = row['previous_price'] - row['asking_price']
+        pct = (diff / row['previous_price']) * 100
+        return diff, pct
+
+    price_drops = df.apply(calc_price_drop, axis=1)
+    df['price_drop_amount'] = price_drops.apply(lambda x: x[0] if x else None)
+    df['price_drop_pct'] = price_drops.apply(lambda x: x[1] if x else None)
 
     return df
 
@@ -592,6 +642,16 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     # お気に入りフィルター (#14)
     if filters.get("favorites_only"):
         filtered = filtered[filtered["id"].isin(st.session_state.favorites)]
+
+    # 新着フィルター
+    if filters.get("new_only"):
+        if "is_new" in filtered.columns:
+            filtered = filtered[filtered["is_new"] == True]
+
+    # 値下げフィルター
+    if filters.get("price_drop_only"):
+        if "is_price_dropped" in filtered.columns:
+            filtered = filtered[filtered["is_price_dropped"] == True]
 
     # 区フィルター
     if filters.get("wards"):
@@ -728,6 +788,17 @@ def render_sidebar(df: pd.DataFrame) -> dict:
     with col2:
         filters["hide_viewed"] = st.checkbox("✓ 閲覧済み非表示", value=False)
 
+    # 新着・値下げフィルター
+    col3, col4 = st.sidebar.columns(2)
+    with col3:
+        # 新着件数を表示
+        new_count = df['is_new'].sum() if 'is_new' in df.columns else 0
+        filters["new_only"] = st.checkbox(f"🆕 新着のみ ({new_count})", value=False)
+    with col4:
+        # 値下げ件数を表示
+        drop_count = df['is_price_dropped'].sum() if 'is_price_dropped' in df.columns else 0
+        filters["price_drop_only"] = st.checkbox(f"📉 値下げのみ ({drop_count})", value=False)
+
     # スコアフィルター（重要なので上に移動）
     score_options = {
         "全物件": "all",
@@ -838,7 +909,7 @@ def render_sidebar(df: pd.DataFrame) -> dict:
             "築年数（年以内）",
             min_value=0,
             max_value=50,
-            value=30,
+            value=40,
         )
 
         # 間取り
@@ -862,7 +933,7 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         walk_selection = st.radio(
             "駅徒歩",
             options=list(walk_options.keys()),
-            index=2,
+            index=3,  # デフォルト15分
             horizontal=True,
             label_visibility="collapsed",
         )
@@ -1023,6 +1094,20 @@ def render_map(df: pd.DataFrame):
     st.caption("💡 物件詳細を見るには下の一覧からSUUMOリンクをクリックしてください")
 
 
+def build_status_badges(row) -> str:
+    """新着・値下げバッジを生成"""
+    badges = []
+    if row.get('is_new'):
+        badges.append('<span style="background-color:#4CAF50;color:white;padding:2px 6px;border-radius:4px;font-size:0.8em;margin-right:4px;">NEW</span>')
+    if row.get('is_price_dropped'):
+        drop_amount = row.get('price_drop_amount', 0) or 0
+        drop_pct = row.get('price_drop_pct', 0) or 0
+        if drop_amount > 0:
+            drop_text = f"-{drop_amount/10000:.0f}万 ({drop_pct:.1f}%)"
+            badges.append(f'<span style="background-color:#FF5722;color:white;padding:2px 6px;border-radius:4px;font-size:0.8em;">値下げ {drop_text}</span>')
+    return "".join(badges)
+
+
 def build_feature_tags(row) -> str:
     """物件の特徴タグを生成"""
     tags = []
@@ -1082,6 +1167,11 @@ def render_top100(df: pd.DataFrame):
             st.markdown(rank_display)
 
         with col2:
+            # ステータスバッジ（新着・値下げ）
+            status_badges = build_status_badges(row)
+            if status_badges:
+                st.markdown(status_badges, unsafe_allow_html=True)
+
             # 物件名 + 特徴アイコン
             feature_tags = build_feature_tags(row)
             name_display = f"**{row['property_name'][:40]}** {feature_tags}" if feature_tags else f"**{row['property_name'][:40]}**"
@@ -1280,6 +1370,11 @@ def render_table(df: pd.DataFrame):
                     st.session_state.compare_list.remove(row["id"])
 
         with col3:
+            # ステータスバッジ（新着・値下げ）
+            status_badges = build_status_badges(row)
+            if status_badges:
+                st.markdown(status_badges, unsafe_allow_html=True)
+
             # 物件名 + 特徴アイコン + 閲覧済みマーク
             feature_tags = build_feature_tags(row)
             viewed_mark = "✓ " if is_viewed else ""

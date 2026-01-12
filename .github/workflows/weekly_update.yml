@@ -7,8 +7,14 @@ on:
   workflow_dispatch:
     # 手動実行も可能
 
+# 並列実行を防止（SQLiteコンフリクト回避）
+concurrency:
+  group: weekly-update
+  cancel-in-progress: false
+
 env:
   REINFOLIB_API_KEY: ${{ secrets.REINFOLIB_API_KEY }}
+  DB_RELEASE_TAG: db-latest
 
 jobs:
   update-data:
@@ -19,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0  # 全履歴を取得（rebase用）
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,6 +41,21 @@ jobs:
       - name: Create .env file
         run: |
           echo "REINFOLIB_API_KEY=${{ secrets.REINFOLIB_API_KEY }}" > .env
+
+      - name: Download latest DB from release
+        id: download_db
+        run: |
+          # 最新のDBリリースをダウンロード
+          if gh release view ${{ env.DB_RELEASE_TAG }} &>/dev/null; then
+            echo "Downloading DB from release..."
+            gh release download ${{ env.DB_RELEASE_TAG }} -p "apartment.db" -D data/ --clobber
+            echo "downloaded=true" >> $GITHUB_OUTPUT
+          else
+            echo "No existing DB release found, using repo version"
+            echo "downloaded=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run SUUMO Scraper
         run: |
@@ -66,37 +87,61 @@ jobs:
           cd scripts && python geocode.py
           echo "=== Geocoding Completed at $(date) ==="
 
-      - name: Check for changes
-        id: check_changes
+      - name: Upload DB to release
         run: |
-          if git diff --quiet data/apartment.db; then
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No changes detected in database"
-          else
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Changes detected in database"
+          # リリースが存在しない場合は作成
+          if ! gh release view ${{ env.DB_RELEASE_TAG }} &>/dev/null; then
+            echo "Creating release ${{ env.DB_RELEASE_TAG }}..."
+            gh release create ${{ env.DB_RELEASE_TAG }} \
+              --title "Database (auto-updated)" \
+              --notes "自動更新されるデータベースファイル" \
+              --latest=false
           fi
 
-      - name: Commit and push changes
-        if: steps.check_changes.outputs.changed == 'true'
+          # DBファイルをアップロード（上書き）
+          echo "Uploading apartment.db..."
+          gh release upload ${{ env.DB_RELEASE_TAG }} data/apartment.db --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit and push changes to repo
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add data/apartment.db
-          git commit -m "chore: weekly data update $(date +'%Y-%m-%d')"
-          # リモートの変更を取り込んでからpush（コンフリクト防止）
-          git pull --rebase origin main
-          git push origin main
 
-      - name: Summary
+          # DBファイルに変更があるか確認
+          if ! git diff --quiet data/apartment.db; then
+            git add data/apartment.db
+            git commit -m "chore: weekly data update $(date +'%Y-%m-%d')"
+            # リモートの変更を取り込んでからpush
+            git pull --rebase origin main || true
+            git push origin main || echo "Push failed, but DB is saved in release"
+          else
+            echo "No changes to commit"
+          fi
+
+      - name: Generate Summary
         run: |
+          # DB統計を取得
+          LISTINGS_COUNT=$(sqlite3 data/apartment.db "SELECT COUNT(*) FROM listings WHERE status='active'")
+          NEW_COUNT=$(sqlite3 data/apartment.db "SELECT COUNT(*) FROM listings WHERE status='active' AND first_seen_at >= datetime('now', '-7 days')")
+          PRICE_CHANGED=$(sqlite3 data/apartment.db "SELECT COUNT(*) FROM listings WHERE status='active' AND price_changed_at >= datetime('now', '-7 days')")
+          SOLD_COUNT=$(sqlite3 data/apartment.db "SELECT COUNT(*) FROM listings WHERE status='sold'")
+          HISTORY_COUNT=$(sqlite3 data/apartment.db "SELECT COUNT(*) FROM price_history")
+
           echo "## Weekly Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 実行情報" >> $GITHUB_STEP_SUMMARY
           echo "- **Date**: $(date +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- **Database size**: $(ls -lh data/apartment.db | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.check_changes.outputs.changed }}" == "true" ]; then
-            echo "✅ Database updated and pushed to repository" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "ℹ️ No changes detected, skipped commit" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "### 物件統計" >> $GITHUB_STEP_SUMMARY
+          echo "| 項目 | 件数 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| アクティブ物件 | ${LISTINGS_COUNT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 新着（7日以内） | ${NEW_COUNT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 価格変動（7日以内） | ${PRICE_CHANGED} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 掲載終了 | ${SOLD_COUNT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 価格履歴レコード | ${HISTORY_COUNT} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Database uploaded to release: \`${{ env.DB_RELEASE_TAG }}\`" >> $GITHUB_STEP_SUMMARY
