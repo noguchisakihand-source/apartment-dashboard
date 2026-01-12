@@ -35,16 +35,21 @@ st.set_page_config(
     initial_sidebar_state="collapsed",  # スマホ時はサイドバー閉じる
 )
 
-# お気に入りキー（localStorage用）
+# localStorage用キー
 FAVORITES_KEY = "apartment_favorites"
+VIEWED_KEY = "apartment_viewed"
 
 # セッションステート初期化
 if "favorites" not in st.session_state:
     st.session_state.favorites = set()
+if "viewed" not in st.session_state:
+    st.session_state.viewed = set()
 if "compare_list" not in st.session_state:
     st.session_state.compare_list = []
 if "favorites_loaded" not in st.session_state:
     st.session_state.favorites_loaded = False
+if "viewed_loaded" not in st.session_state:
+    st.session_state.viewed_loaded = False
 
 
 def inject_mobile_css():
@@ -291,6 +296,209 @@ def load_favorites_from_query():
     st.session_state.favorites_loaded = True
 
 
+def inject_viewed_loader():
+    """閲覧済みをlocalStorageから読み込み"""
+    if not st.session_state.viewed_loaded and len(st.session_state.viewed) == 0:
+        components.html(f"""
+        <script>
+        (function() {{
+            const key = '{VIEWED_KEY}';
+            const saved = localStorage.getItem(key);
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('viewed')) {{
+                return;
+            }}
+            if (saved) {{
+                try {{
+                    const viewedIds = JSON.parse(saved);
+                    if (Array.isArray(viewedIds) && viewedIds.length > 0) {{
+                        const currentUrl = new URL(window.location.href);
+                        currentUrl.searchParams.set('viewed', viewedIds.join(','));
+                        window.location.replace(currentUrl.toString());
+                    }}
+                }} catch(e) {{
+                    console.error('Failed to parse viewed:', e);
+                }}
+            }}
+        }})();
+        </script>
+        """, height=0)
+
+
+def load_viewed_from_query():
+    """URLクエリパラメータから閲覧済みを復元"""
+    if st.session_state.viewed_loaded:
+        return
+
+    query_params = st.query_params
+    if "viewed" in query_params:
+        try:
+            viewed_str = query_params.get("viewed", "")
+            if viewed_str:
+                viewed_ids = [int(x) for x in viewed_str.split(",") if x.strip()]
+                st.session_state.viewed = set(viewed_ids)
+        except Exception:
+            pass
+
+    st.session_state.viewed_loaded = True
+
+
+def save_viewed_to_localstorage(viewed_ids):
+    """閲覧済みをlocalStorageに保存"""
+    viewed_list = list(viewed_ids) if viewed_ids else []
+    json_ids = json.dumps(viewed_list)
+    components.html(f"""
+    <script>
+    (function() {{
+        const key = '{VIEWED_KEY}';
+        const viewedIds = {json_ids};
+        localStorage.setItem(key, JSON.stringify(viewedIds));
+    }})();
+    </script>
+    """, height=0)
+
+
+def mark_as_viewed(listing_id: int):
+    """物件を閲覧済みとしてマーク"""
+    st.session_state.viewed.add(listing_id)
+    save_viewed_to_localstorage(st.session_state.viewed)
+
+
+def load_filters_from_query() -> dict:
+    """URLクエリパラメータからフィルター条件を復元"""
+    query_params = st.query_params
+    filters_from_url = {}
+
+    # 区
+    if "wards" in query_params:
+        wards_str = query_params.get("wards", "")
+        if wards_str:
+            filters_from_url["wards"] = [w.strip() for w in wards_str.split(",") if w.strip()]
+
+    # 価格
+    if "price_min" in query_params:
+        try:
+            filters_from_url["price_min"] = int(query_params.get("price_min"))
+        except:
+            pass
+    if "price_max" in query_params:
+        try:
+            filters_from_url["price_max"] = int(query_params.get("price_max"))
+        except:
+            pass
+
+    # 面積
+    if "area_min" in query_params:
+        try:
+            filters_from_url["area_min"] = int(query_params.get("area_min"))
+        except:
+            pass
+    if "area_max" in query_params:
+        try:
+            filters_from_url["area_max"] = int(query_params.get("area_max"))
+        except:
+            pass
+
+    # 築年数
+    if "age_max" in query_params:
+        try:
+            filters_from_url["age_max"] = int(query_params.get("age_max"))
+        except:
+            pass
+
+    # 間取り
+    if "layouts" in query_params:
+        layouts_str = query_params.get("layouts", "")
+        if layouts_str:
+            filters_from_url["floor_plans"] = [l.strip() for l in layouts_str.split(",") if l.strip()]
+
+    # 駅徒歩
+    if "walk_max" in query_params:
+        try:
+            filters_from_url["walk_max"] = int(query_params.get("walk_max"))
+        except:
+            pass
+
+    # 物件名検索
+    if "search" in query_params:
+        filters_from_url["search"] = query_params.get("search", "")
+
+    return filters_from_url
+
+
+def update_url_with_filters(filters: dict):
+    """フィルター条件をURLクエリパラメータに反映"""
+    # 既存のパラメータを保持しつつ更新
+    current_params = dict(st.query_params)
+
+    # フィルター条件を追加
+    target_wards = get_target_wards()
+
+    # 区（全選択でない場合のみ）
+    if filters.get("wards") and set(filters["wards"]) != set(target_wards):
+        current_params["wards"] = ",".join(filters["wards"])
+    elif "wards" in current_params:
+        del current_params["wards"]
+
+    # 価格（デフォルト値と異なる場合のみ）
+    if filters.get("price_min") and filters["price_min"] != 5000:
+        current_params["price_min"] = str(filters["price_min"])
+    elif "price_min" in current_params:
+        del current_params["price_min"]
+
+    if filters.get("price_max") and filters["price_max"] != 15000:
+        current_params["price_max"] = str(filters["price_max"])
+    elif "price_max" in current_params:
+        del current_params["price_max"]
+
+    # 面積
+    if filters.get("area_min") and filters["area_min"] != 50:
+        current_params["area_min"] = str(filters["area_min"])
+    elif "area_min" in current_params:
+        del current_params["area_min"]
+
+    if filters.get("area_max") and filters["area_max"] != 150:
+        current_params["area_max"] = str(filters["area_max"])
+    elif "area_max" in current_params:
+        del current_params["area_max"]
+
+    # 築年数
+    if filters.get("age_max") and filters["age_max"] != 30:
+        current_params["age_max"] = str(filters["age_max"])
+    elif "age_max" in current_params:
+        del current_params["age_max"]
+
+    # 間取り（全選択でない場合のみ）
+    floor_plan_options = ["1LDK", "2LDK", "3LDK", "4LDK+"]
+    if filters.get("floor_plans") and set(filters["floor_plans"]) != set(floor_plan_options):
+        current_params["layouts"] = ",".join(filters["floor_plans"])
+    elif "layouts" in current_params:
+        del current_params["layouts"]
+
+    # 駅徒歩
+    if filters.get("walk_max") and filters["walk_max"] != 10:
+        current_params["walk_max"] = str(filters["walk_max"])
+    elif "walk_max" in current_params:
+        del current_params["walk_max"]
+
+    # 物件名検索
+    if filters.get("search"):
+        current_params["search"] = filters["search"]
+    elif "search" in current_params:
+        del current_params["search"]
+
+    # URLを更新（JavaScript経由で履歴を変更、リロードなし）
+    params_str = "&".join(f"{k}={v}" for k, v in current_params.items())
+    components.html(f"""
+    <script>
+    (function() {{
+        const newUrl = window.location.pathname + '{"?" + params_str if params_str else ""}';
+        window.history.replaceState({{}}, '', newUrl);
+    }})();
+    </script>
+    """, height=0)
+
+
 @st.cache_data(ttl=300)  # #23: 60秒→300秒
 def load_listings() -> pd.DataFrame:
     """物件データを読み込み"""
@@ -329,6 +537,18 @@ def get_station_list() -> list:
 def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     """フィルターを適用"""
     filtered = df.copy()
+
+    # 物件名検索フィルター
+    if filters.get("search"):
+        search_term = filters["search"].strip()
+        if search_term:
+            filtered = filtered[
+                filtered["property_name"].str.contains(search_term, case=False, na=False)
+            ]
+
+    # 閲覧済み非表示フィルター
+    if filters.get("hide_viewed"):
+        filtered = filtered[~filtered["id"].isin(st.session_state.viewed)]
 
     # お気に入りフィルター (#14)
     if filters.get("favorites_only"):
@@ -398,16 +618,39 @@ def render_sidebar(df: pd.DataFrame) -> dict:
     """サイドバーにフィルターを表示（スマホ対応：折りたたみ式）"""
     st.sidebar.header("🔍 フィルター")
 
-    # お気に入り件数表示 (#14)
+    # URLからフィルター条件を読み込み
+    url_filters = load_filters_from_query()
+
+    # お気に入り・閲覧済み件数表示
     fav_count = len(st.session_state.favorites)
-    if fav_count > 0:
-        st.sidebar.success(f"⭐ お気に入り: {fav_count}件")
+    viewed_count = len(st.session_state.viewed)
+    if fav_count > 0 or viewed_count > 0:
+        status_parts = []
+        if fav_count > 0:
+            status_parts.append(f"⭐ {fav_count}件")
+        if viewed_count > 0:
+            status_parts.append(f"✓ {viewed_count}件閲覧済")
+        st.sidebar.caption(" / ".join(status_parts))
 
     filters = {}
 
+    # === 物件名検索（最上部に配置） ===
+    search_default = url_filters.get("search", "")
+    filters["search"] = st.sidebar.text_input(
+        "🔍 物件名で検索",
+        value=search_default,
+        placeholder="例: パークタワー",
+        key="search_input"
+    )
+
+    st.sidebar.divider()
+
     # === クイックフィルター（常に表示） ===
-    # お気に入りフィルター (#14)
-    filters["favorites_only"] = st.sidebar.checkbox("⭐ お気に入りのみ表示", value=False)
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        filters["favorites_only"] = st.checkbox("⭐ お気に入りのみ", value=False)
+    with col2:
+        filters["hide_viewed"] = st.checkbox("✓ 閲覧済み非表示", value=False)
 
     # スコアフィルター（重要なので上に移動）
     score_options = {
@@ -713,6 +956,8 @@ def render_top100(df: pd.DataFrame):
     top10 = top100.head(10)
 
     for i, (_, row) in enumerate(top10.iterrows(), 1):
+        is_viewed = row["id"] in st.session_state.viewed
+
         # 補正後相場を使用
         adj_price = row["adjusted_market_price"] if pd.notna(row["adjusted_market_price"]) else row["market_price"]
         diff = adj_price - row["asking_price"]
@@ -728,13 +973,18 @@ def render_top100(df: pd.DataFrame):
         col1, col2, col3, col4, col5 = st.columns([0.5, 3, 2, 1, 0.5])
 
         with col1:
-            st.markdown(f"### {i}")
+            # 順位 + 閲覧済みマーク
+            rank_display = f"### {'✓' if is_viewed else ''}{i}"
+            st.markdown(rank_display)
 
         with col2:
             # 物件名 + 特徴アイコン
             feature_tags = build_feature_tags(row)
             name_display = f"**{row['property_name'][:40]}** {feature_tags}" if feature_tags else f"**{row['property_name'][:40]}**"
-            st.markdown(name_display)
+            if is_viewed:
+                st.markdown(f"<span style='color:#888'>{name_display}</span>", unsafe_allow_html=True)
+            else:
+                st.markdown(name_display)
             # #19: 築年表示形式変更
             age = CURRENT_YEAR - row['building_year'] if pd.notna(row['building_year']) else '?'
             station_info = f"{row['station_name']} 徒歩{int(row['minutes_to_station'])}分" if pd.notna(row['station_name']) else ""
@@ -827,15 +1077,23 @@ def render_table(df: pd.DataFrame):
         st.info("条件に合う物件がありません")
         return
 
-    # ソート選択
+    # 月額費用カラムを追加（ソート用）
+    df = df.copy()
+    df["monthly_cost"] = df["management_fee"].fillna(0) + df["repair_reserve"].fillna(0)
+
+    # ソート選択（拡張版）
     sort_options = {
         "スコア（高い順）": ("deal_score", False),
         "スコア（低い順）": ("deal_score", True),
         "価格（安い順）": ("asking_price", True),
         "価格（高い順）": ("asking_price", False),
         "面積（広い順）": ("area", False),
-        "階数（高い順）": ("floor", False),
+        "面積（狭い順）": ("area", True),
         "築年（新しい順）": ("building_year", False),
+        "築年（古い順）": ("building_year", True),
+        "駅徒歩（近い順）": ("minutes_to_station", True),
+        "月額費用（安い順）": ("monthly_cost", True),
+        "階数（高い順）": ("floor", False),
     }
 
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -878,6 +1136,7 @@ def render_table(df: pd.DataFrame):
 
     # テーブル表示（お気に入り・比較チェック付き）
     for _, row in df_page.iterrows():
+        is_viewed = row["id"] in st.session_state.viewed
         col1, col2, col3, col4, col5, col6 = st.columns([0.3, 0.3, 3, 1.5, 1, 0.8])
 
         with col1:
@@ -906,10 +1165,15 @@ def render_table(df: pd.DataFrame):
                     st.session_state.compare_list.remove(row["id"])
 
         with col3:
-            # 物件名 + 特徴アイコン
+            # 物件名 + 特徴アイコン + 閲覧済みマーク
             feature_tags = build_feature_tags(row)
-            name_display = f"**{row['property_name'][:35]}** {feature_tags}" if feature_tags else f"**{row['property_name'][:35]}**"
-            st.markdown(name_display)
+            viewed_mark = "✓ " if is_viewed else ""
+            name_text = f"{viewed_mark}**{row['property_name'][:35]}** {feature_tags}" if feature_tags else f"{viewed_mark}**{row['property_name'][:35]}**"
+            # 閲覧済みは薄いグレー表示
+            if is_viewed:
+                st.markdown(f"<span style='color:#888'>{name_text}</span>", unsafe_allow_html=True)
+            else:
+                st.markdown(name_text)
             station_info = f"{row['station_name']} 徒歩{int(row['minutes_to_station'])}分" if pd.notna(row['station_name']) else ""
             direction = f" / {row['direction']}" if pd.notna(row['direction']) else ""
             st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / {format_building_age(row['building_year'])}{direction} / {station_info}")
@@ -944,7 +1208,17 @@ def render_table(df: pd.DataFrame):
 
         with col6:
             if pd.notna(row["suumo_url"]):
-                st.link_button("SUUMO", row["suumo_url"], use_container_width=True)
+                # SUUMOリンク + 閲覧済みマークボタン
+                link_col, mark_col = st.columns([3, 1])
+                with link_col:
+                    st.link_button("SUUMO", row["suumo_url"], use_container_width=True)
+                with mark_col:
+                    if not is_viewed:
+                        if st.button("✓", key=f"view_{row['id']}", help="閲覧済みにする"):
+                            mark_as_viewed(row["id"])
+                            st.rerun()
+                    else:
+                        st.caption("✓")
 
     # CSVエクスポート
     st.divider()
@@ -1122,6 +1396,10 @@ def main():
     load_favorites_from_query()
     inject_favorites_loader()
 
+    # 閲覧済みをlocalStorageから復元（初回のみ）
+    load_viewed_from_query()
+    inject_viewed_loader()
+
     st.title("🏠 不動産お買い得ダッシュボード")
 
     # データ読み込み
@@ -1136,6 +1414,9 @@ def main():
 
     # サイドバーフィルター
     filters = render_sidebar(df)
+
+    # フィルター条件をURLに反映
+    update_url_with_filters(filters)
 
     # フィルター適用
     df_filtered = apply_filters(df, filters)
