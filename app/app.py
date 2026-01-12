@@ -484,7 +484,7 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         with col1:
             filters["area_min"] = st.number_input("最小", min_value=0, value=50, step=5, key="area_min")
         with col2:
-            filters["area_max"] = st.number_input("最大", min_value=0, value=100, step=5, key="area_max")
+            filters["area_max"] = st.number_input("最大", min_value=0, value=150, step=5, key="area_max")
 
         # 築年数
         filters["age_max"] = st.slider(
