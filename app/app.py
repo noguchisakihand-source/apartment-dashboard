@@ -676,6 +676,28 @@ def render_map(df: pd.DataFrame):
     st.caption("💡 物件詳細を見るには下の一覧からSUUMOリンクをクリックしてください")
 
 
+def build_feature_tags(row) -> str:
+    """物件の特徴タグを生成"""
+    tags = []
+    if row.get('pet_allowed'):
+        tags.append("🐕")
+    if row.get('good_view'):
+        tags.append("🏔️")
+    if row.get('good_sunlight'):
+        tags.append("☀️")
+    return " ".join(tags)
+
+
+def build_monthly_cost(row) -> str:
+    """月額費用（管理費+修繕積立金）を生成"""
+    mgmt = row.get('management_fee') or 0
+    repair = row.get('repair_reserve') or 0
+    if mgmt > 0 or repair > 0:
+        total = int(mgmt) + int(repair)
+        return f"月額 {total:,}円"
+    return ""
+
+
 def render_top100(df: pd.DataFrame):
     """#16: TOP100パフォーマンス改善 - 上位10件カード+残りテーブル"""
     st.subheader("お買い得 TOP100")
@@ -709,12 +731,25 @@ def render_top100(df: pd.DataFrame):
             st.markdown(f"### {i}")
 
         with col2:
-            st.markdown(f"**{row['property_name'][:40]}**")
+            # 物件名 + 特徴アイコン
+            feature_tags = build_feature_tags(row)
+            name_display = f"**{row['property_name'][:40]}** {feature_tags}" if feature_tags else f"**{row['property_name'][:40]}**"
+            st.markdown(name_display)
             # #19: 築年表示形式変更
             age = CURRENT_YEAR - row['building_year'] if pd.notna(row['building_year']) else '?'
             station_info = f"{row['station_name']} 徒歩{int(row['minutes_to_station'])}分" if pd.notna(row['station_name']) else ""
             direction = f" / {row['direction']}" if pd.notna(row['direction']) else ""
             st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / 築{age}年{direction} / {station_info}")
+
+            # 追加情報行: 総戸数、月額費用
+            extra_info = []
+            if pd.notna(row.get('total_units')) and row['total_units'] > 0:
+                extra_info.append(f"総戸数 {int(row['total_units'])}戸")
+            monthly = build_monthly_cost(row)
+            if monthly:
+                extra_info.append(monthly)
+            if extra_info:
+                st.caption(" / ".join(extra_info))
 
         with col3:
             st.metric(
@@ -871,7 +906,10 @@ def render_table(df: pd.DataFrame):
                     st.session_state.compare_list.remove(row["id"])
 
         with col3:
-            st.markdown(f"**{row['property_name'][:35]}**")
+            # 物件名 + 特徴アイコン
+            feature_tags = build_feature_tags(row)
+            name_display = f"**{row['property_name'][:35]}** {feature_tags}" if feature_tags else f"**{row['property_name'][:35]}**"
+            st.markdown(name_display)
             station_info = f"{row['station_name']} 徒歩{int(row['minutes_to_station'])}分" if pd.notna(row['station_name']) else ""
             direction = f" / {row['direction']}" if pd.notna(row['direction']) else ""
             st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / {format_building_age(row['building_year'])}{direction} / {station_info}")
@@ -892,8 +930,17 @@ def render_table(df: pd.DataFrame):
                 st.caption("スコア: 未算出")
 
         with col5:
+            # 階数 + 総戸数 + 月額費用
+            info_parts = []
             if pd.notna(row['floor']):
-                st.caption(f"{int(row['floor'])}階")
+                info_parts.append(f"{int(row['floor'])}階")
+            if pd.notna(row.get('total_units')) and row['total_units'] > 0:
+                info_parts.append(f"{int(row['total_units'])}戸")
+            if info_parts:
+                st.caption(" / ".join(info_parts))
+            monthly = build_monthly_cost(row)
+            if monthly:
+                st.caption(monthly)
 
         with col6:
             if pd.notna(row["suumo_url"]):
