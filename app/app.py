@@ -518,6 +518,10 @@ def load_listings() -> pd.DataFrame:
             FROM listings
             WHERE status = 'active'
         """, conn)
+
+    # 通勤時間データを結合
+    df = merge_commute_times(df)
+
     return df
 
 
@@ -532,6 +536,41 @@ def get_station_list() -> list:
             ORDER BY station_name
         """, conn)
     return df["station_name"].tolist()
+
+
+@st.cache_data(ttl=300)
+def get_commute_times() -> pd.DataFrame:
+    """通勤時間データを取得"""
+    with get_connection() as conn:
+        df = pd.read_sql_query("""
+            SELECT from_station, to_station, minutes
+            FROM station_commute_times
+        """, conn)
+    return df
+
+
+def merge_commute_times(df: pd.DataFrame) -> pd.DataFrame:
+    """物件データに通勤時間を結合"""
+    commute_df = get_commute_times()
+
+    if commute_df.empty:
+        df["commute_matsuhidai"] = None
+        df["commute_akabane"] = None
+        return df
+
+    # 松飛台への通勤時間
+    matsuhidai = commute_df[commute_df["to_station"] == "松飛台"][["from_station", "minutes"]]
+    matsuhidai = matsuhidai.rename(columns={"from_station": "station_name", "minutes": "commute_matsuhidai"})
+
+    # 赤羽橋への通勤時間
+    akabane = commute_df[commute_df["to_station"] == "赤羽橋"][["from_station", "minutes"]]
+    akabane = akabane.rename(columns={"from_station": "station_name", "minutes": "commute_akabane"})
+
+    # 結合
+    df = df.merge(matsuhidai, on="station_name", how="left")
+    df = df.merge(akabane, on="station_name", how="left")
+
+    return df
 
 
 def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
@@ -610,6 +649,43 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     elif score_filter == "score_only":
         filtered = filtered[filtered["deal_score"].notna()]
     # "all" の場合はフィルターしない（スコアなし物件も含む）
+
+    # 通勤時間フィルター
+    commute_matsuhidai_max = filters.get("commute_matsuhidai_max")
+    commute_akabane_max = filters.get("commute_akabane_max")
+    commute_both = filters.get("commute_both", False)
+
+    if commute_matsuhidai_max or commute_akabane_max:
+        if commute_both:
+            # 両方満たす
+            conditions = pd.Series([True] * len(filtered), index=filtered.index)
+            if commute_matsuhidai_max:
+                conditions &= (
+                    filtered["commute_matsuhidai"].notna() &
+                    (filtered["commute_matsuhidai"] <= commute_matsuhidai_max)
+                )
+            if commute_akabane_max:
+                conditions &= (
+                    filtered["commute_akabane"].notna() &
+                    (filtered["commute_akabane"] <= commute_akabane_max)
+                )
+            filtered = filtered[conditions]
+        else:
+            # どちらか一方を満たす（OR条件）
+            conditions = pd.Series([False] * len(filtered), index=filtered.index)
+            if commute_matsuhidai_max:
+                conditions |= (
+                    filtered["commute_matsuhidai"].notna() &
+                    (filtered["commute_matsuhidai"] <= commute_matsuhidai_max)
+                )
+            if commute_akabane_max:
+                conditions |= (
+                    filtered["commute_akabane"].notna() &
+                    (filtered["commute_akabane"] <= commute_akabane_max)
+                )
+            # 通勤時間データがない物件は除外しない（フィルター適用時のみ）
+            no_commute_data = filtered["commute_matsuhidai"].isna() & filtered["commute_akabane"].isna()
+            filtered = filtered[conditions | no_commute_data]
 
     return filtered
 
@@ -717,6 +793,34 @@ def render_sidebar(df: pd.DataFrame) -> dict:
             "駅名を選択",
             options=station_list,
             default=[],
+        )
+
+    # === 通勤時間フィルター（折りたたみ） ===
+    with st.sidebar.expander("🚃 通勤時間", expanded=False):
+        st.caption("👩 松飛台まで（分）")
+        filters["commute_matsuhidai_max"] = st.select_slider(
+            "松飛台",
+            options=[None, 30, 40, 50, 60, 70, 80, 90],
+            value=None,
+            format_func=lambda x: "指定なし" if x is None else f"{x}分以内",
+            label_visibility="collapsed",
+            key="commute_matsuhidai"
+        )
+
+        st.caption("👨 赤羽橋まで（分）")
+        filters["commute_akabane_max"] = st.select_slider(
+            "赤羽橋",
+            options=[None, 20, 30, 40, 50, 60],
+            value=None,
+            format_func=lambda x: "指定なし" if x is None else f"{x}分以内",
+            label_visibility="collapsed",
+            key="commute_akabane"
+        )
+
+        filters["commute_both"] = st.checkbox(
+            "☑️ 両方満たす物件のみ",
+            value=True,
+            key="commute_both"
         )
 
     # === 物件条件フィルター（折りたたみ） ===
@@ -1001,6 +1105,15 @@ def render_top100(df: pd.DataFrame):
             if extra_info:
                 st.caption(" / ".join(extra_info))
 
+            # 通勤時間表示
+            commute_parts = []
+            if pd.notna(row.get('commute_matsuhidai')):
+                commute_parts.append(f"松飛台 {int(row['commute_matsuhidai'])}分")
+            if pd.notna(row.get('commute_akabane')):
+                commute_parts.append(f"赤羽橋 {int(row['commute_akabane'])}分")
+            if commute_parts:
+                st.caption(f"🚃 {' / '.join(commute_parts)}")
+
         with col3:
             st.metric(
                 label="売出価格",
@@ -1094,6 +1207,8 @@ def render_table(df: pd.DataFrame):
         "駅徒歩（近い順）": ("minutes_to_station", True),
         "月額費用（安い順）": ("monthly_cost", True),
         "階数（高い順）": ("floor", False),
+        "松飛台通勤（近い順）": ("commute_matsuhidai", True),
+        "赤羽橋通勤（近い順）": ("commute_akabane", True),
     }
 
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -1205,6 +1320,14 @@ def render_table(df: pd.DataFrame):
             monthly = build_monthly_cost(row)
             if monthly:
                 st.caption(monthly)
+            # 通勤時間
+            commute_parts = []
+            if pd.notna(row.get('commute_matsuhidai')):
+                commute_parts.append(f"松{int(row['commute_matsuhidai'])}")
+            if pd.notna(row.get('commute_akabane')):
+                commute_parts.append(f"赤{int(row['commute_akabane'])}")
+            if commute_parts:
+                st.caption(f"🚃 {'/'.join(commute_parts)}分")
 
         with col6:
             if pd.notna(row["suumo_url"]):
