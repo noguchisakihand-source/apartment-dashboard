@@ -505,19 +505,28 @@ def load_listings() -> pd.DataFrame:
     with get_connection() as conn:
         df = pd.read_sql_query("""
             SELECT
-                id, property_name, ward_name, address,
-                station_name, minutes_to_station,
-                asking_price, market_price, adjusted_market_price,
-                walk_factor, floor_factor, direction, direction_factor,
-                area_factor, fallback_level, deal_score,
-                area, floor_plan, building_year,
-                floor, total_floors,
-                total_units, management_fee, repair_reserve, structure,
-                pet_allowed, good_view, good_sunlight,
-                latitude, longitude, suumo_url, updated_at,
-                first_seen_at, last_seen_at, price_changed_at, previous_price
-            FROM listings
-            WHERE status = 'active'
+                l.id, l.property_name, l.ward_name, l.address,
+                l.station_name, l.minutes_to_station,
+                l.asking_price, l.market_price, l.adjusted_market_price,
+                l.walk_factor, l.floor_factor, l.direction, l.direction_factor,
+                l.area_factor, l.fallback_level, l.deal_score,
+                l.area, l.floor_plan, l.building_year,
+                l.floor, l.total_floors,
+                l.total_units, l.management_fee, l.repair_reserve, l.structure,
+                l.pet_allowed, l.good_view, l.good_sunlight,
+                l.latitude, l.longitude, l.suumo_url, l.updated_at,
+                l.first_seen_at, l.last_seen_at, l.price_changed_at, l.previous_price,
+                ph.initial_price, ph.drop_count
+            FROM listings l
+            LEFT JOIN (
+                SELECT
+                    listing_id,
+                    MAX(price) as initial_price,
+                    COUNT(*) as drop_count
+                FROM price_history
+                GROUP BY listing_id
+            ) ph ON l.id = ph.listing_id
+            WHERE l.status = 'active'
         """, conn)
 
     # 通勤時間データを結合
@@ -597,6 +606,143 @@ def get_commute_times() -> pd.DataFrame:
             FROM station_commute_times
         """, conn)
     return df
+
+
+@st.cache_data(ttl=300)
+def get_price_history(listing_id: int) -> pd.DataFrame:
+    """物件の価格履歴を取得"""
+    with get_connection() as conn:
+        df = pd.read_sql_query("""
+            SELECT price, recorded_at
+            FROM price_history
+            WHERE listing_id = ?
+            ORDER BY recorded_at ASC
+        """, conn, params=(listing_id,))
+    return df
+
+
+@st.cache_data(ttl=300)
+def get_price_change_summary() -> dict:
+    """価格変動サマリーを取得"""
+    with get_connection() as conn:
+        # 今週の値下げ件数と平均
+        price_drops = pd.read_sql_query("""
+            SELECT
+                l.id, l.property_name, l.ward_name, l.asking_price,
+                l.previous_price, l.price_changed_at,
+                (l.previous_price - l.asking_price) as drop_amount,
+                CAST((l.previous_price - l.asking_price) AS FLOAT) / l.previous_price * 100 as drop_pct
+            FROM listings l
+            WHERE l.status = 'active'
+              AND l.price_changed_at >= datetime('now', '-7 days')
+              AND l.previous_price > l.asking_price
+            ORDER BY drop_amount DESC
+        """, conn)
+
+        # 掲載終了件数（今週）
+        sold_count = pd.read_sql_query("""
+            SELECT COUNT(*) as count
+            FROM listings
+            WHERE status = 'sold'
+              AND last_seen_at >= datetime('now', '-7 days')
+        """, conn).iloc[0]['count']
+
+        # 価格履歴レコード総数
+        history_count = pd.read_sql_query("""
+            SELECT COUNT(*) as count FROM price_history
+        """, conn).iloc[0]['count']
+
+        # 値下げ回数が多い物件
+        multi_drops = pd.read_sql_query("""
+            SELECT
+                l.id, l.property_name, l.ward_name,
+                COUNT(ph.id) as drop_count,
+                l.asking_price,
+                MAX(ph.price) as initial_price
+            FROM listings l
+            JOIN price_history ph ON l.id = ph.listing_id
+            WHERE l.status = 'active'
+            GROUP BY l.id
+            HAVING drop_count >= 1
+            ORDER BY drop_count DESC, (MAX(ph.price) - l.asking_price) DESC
+            LIMIT 10
+        """, conn)
+
+    return {
+        "price_drops": price_drops,
+        "sold_count": sold_count,
+        "history_count": history_count,
+        "multi_drops": multi_drops,
+        "drop_count": len(price_drops),
+        "avg_drop_amount": price_drops['drop_amount'].mean() if not price_drops.empty else 0,
+        "avg_drop_pct": price_drops['drop_pct'].mean() if not price_drops.empty else 0,
+    }
+
+
+def render_price_history_chart(listing_id: int, current_price: int, first_seen_at: str = None):
+    """価格推移グラフを表示"""
+    history = get_price_history(listing_id)
+
+    if history.empty:
+        # データがない場合
+        if first_seen_at:
+            try:
+                seen_date = pd.to_datetime(first_seen_at)
+                st.info(f"📅 初回登録: {seen_date.strftime('%Y/%m/%d')} - {current_price/10000:,.0f}万円")
+            except:
+                st.info("価格履歴はまだありません")
+        else:
+            st.info("価格履歴はまだありません")
+        return
+
+    # 現在価格を追加
+    history_with_current = history.copy()
+    history_with_current['recorded_at'] = pd.to_datetime(history_with_current['recorded_at'])
+
+    # 現在のデータポイントを追加
+    current_row = pd.DataFrame([{
+        'price': current_price,
+        'recorded_at': pd.Timestamp.now()
+    }])
+    history_with_current = pd.concat([history_with_current, current_row], ignore_index=True)
+
+    # 価格を万円に変換
+    history_with_current['price_man'] = history_with_current['price'] / 10000
+
+    # グラフ作成
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=history_with_current['recorded_at'],
+        y=history_with_current['price_man'],
+        mode='lines+markers',
+        name='価格',
+        line=dict(color='#2196F3', width=2),
+        marker=dict(size=8),
+        hovertemplate='%{x|%Y/%m/%d}<br>%{y:,.0f}万円<extra></extra>'
+    ))
+
+    # 初回価格からの変動を表示
+    initial_price = history_with_current['price'].iloc[0]
+    price_diff = current_price - initial_price
+    diff_pct = (price_diff / initial_price) * 100 if initial_price > 0 else 0
+
+    title_text = "価格推移"
+    if price_diff != 0:
+        diff_str = f"{price_diff/10000:+,.0f}万円 ({diff_pct:+.1f}%)"
+        title_text = f"価格推移 【{diff_str}】"
+
+    fig.update_layout(
+        title=title_text,
+        xaxis_title="日付",
+        yaxis_title="価格（万円）",
+        height=250,
+        margin=dict(l=0, r=0, t=30, b=0),
+        hovermode='x unified',
+        yaxis=dict(tickformat=','),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def merge_commute_times(df: pd.DataFrame) -> pd.DataFrame:
@@ -1108,6 +1254,30 @@ def build_status_badges(row) -> str:
     return "".join(badges)
 
 
+def build_price_history_summary(row) -> str:
+    """価格履歴サマリーを生成（初回価格からの累計変動）"""
+    initial_price = row.get('initial_price')
+    drop_count = row.get('drop_count', 0) or 0
+    current_price = row.get('asking_price')
+
+    if pd.isna(initial_price) or drop_count == 0:
+        return ""
+
+    total_drop = initial_price - current_price
+    total_pct = (total_drop / initial_price) * 100 if initial_price > 0 else 0
+
+    if total_drop <= 0:
+        return ""
+
+    return (
+        f'<span style="color:#666;font-size:0.85em;">'
+        f'初回 {initial_price/10000:,.0f}万 → 現在 {current_price/10000:,.0f}万 '
+        f'(累計 -{total_drop/10000:,.0f}万 / -{total_pct:.1f}%) '
+        f'値下げ{int(drop_count)}回'
+        f'</span>'
+    )
+
+
 def build_feature_tags(row) -> str:
     """物件の特徴タグを生成"""
     tags = []
@@ -1203,6 +1373,11 @@ def render_top100(df: pd.DataFrame):
                 commute_parts.append(f"赤羽橋 {int(row['commute_akabane'])}分")
             if commute_parts:
                 st.caption(f"🚃 {' / '.join(commute_parts)}")
+
+            # 価格履歴サマリー（複数回値下げがある場合）
+            price_summary = build_price_history_summary(row)
+            if price_summary:
+                st.markdown(price_summary, unsafe_allow_html=True)
 
         with col3:
             st.metric(
@@ -1388,6 +1563,11 @@ def render_table(df: pd.DataFrame):
             direction = f" / {row['direction']}" if pd.notna(row['direction']) else ""
             st.caption(f"{row['ward_name']} / {row['floor_plan']} / {row['area']:.0f}㎡ / {format_building_age(row['building_year'])}{direction} / {station_info}")
 
+            # 価格履歴サマリー（複数回値下げがある場合）
+            price_summary = build_price_history_summary(row)
+            if price_summary:
+                st.markdown(price_summary, unsafe_allow_html=True)
+
         with col4:
             st.markdown(f"**{row['asking_price']/10000:,.0f}万円**")
             if pd.notna(row['market_price']):
@@ -1518,6 +1698,14 @@ def render_compare(df: pd.DataFrame):
             if pd.notna(row["suumo_url"]):
                 st.link_button("SUUMO詳細", row["suumo_url"], use_container_width=True)
 
+            # 価格推移グラフ
+            st.markdown("---")
+            render_price_history_chart(
+                row['id'],
+                row['asking_price'],
+                row.get('first_seen_at')
+            )
+
     st.divider()
 
 
@@ -1603,6 +1791,66 @@ def render_analytics(df: pd.DataFrame):
         )
         fig_station.update_layout(height=350, yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig_station, use_container_width=True)
+
+    # 価格変動サマリーセクション
+    st.divider()
+    render_price_change_summary()
+
+
+def render_price_change_summary():
+    """価格変動サマリーセクションを表示"""
+    st.markdown("### 📉 価格変動サマリー（過去7日間）")
+
+    summary = get_price_change_summary()
+
+    # データがない場合
+    if summary['history_count'] == 0 and summary['drop_count'] == 0:
+        st.info("まだ価格変動データがありません。週次更新で蓄積されます。")
+        return
+
+    # サマリーメトリクス
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("値下げ件数", f"{summary['drop_count']}件")
+
+    with col2:
+        avg_drop = summary['avg_drop_amount'] / 10000 if summary['avg_drop_amount'] else 0
+        st.metric("平均値下げ額", f"{avg_drop:,.0f}万円")
+
+    with col3:
+        st.metric("平均値下げ率", f"{summary['avg_drop_pct']:.1f}%")
+
+    with col4:
+        st.metric("掲載終了", f"{summary['sold_count']}件")
+
+    # 値下げ物件TOP5
+    if not summary['price_drops'].empty:
+        st.markdown("#### 値下げ物件TOP5（値下げ額順）")
+
+        top5 = summary['price_drops'].head(5)
+        for _, row in top5.iterrows():
+            drop_man = row['drop_amount'] / 10000
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(f"**{row['property_name'][:30]}** ({row['ward_name']})")
+                st.caption(f"現在 {row['asking_price']/10000:,.0f}万円 ← 前回 {row['previous_price']/10000:,.0f}万円")
+            with col2:
+                st.markdown(f"<span style='color:#FF5722;font-size:1.2em;font-weight:bold'>-{drop_man:,.0f}万 ({row['drop_pct']:.1f}%)</span>", unsafe_allow_html=True)
+
+    # 複数回値下げ物件
+    if not summary['multi_drops'].empty:
+        st.markdown("#### 複数回値下げ物件")
+
+        for _, row in summary['multi_drops'].head(5).iterrows():
+            total_drop = row['initial_price'] - row['asking_price']
+            total_pct = (total_drop / row['initial_price']) * 100 if row['initial_price'] > 0 else 0
+            st.markdown(
+                f"**{row['property_name'][:25]}** ({row['ward_name']}) - "
+                f"値下げ {int(row['drop_count'])}回 | "
+                f"初回 {row['initial_price']/10000:,.0f}万 → 現在 {row['asking_price']/10000:,.0f}万 "
+                f"(累計 -{total_drop/10000:,.0f}万 / -{total_pct:.1f}%)"
+            )
 
 
 def main():
