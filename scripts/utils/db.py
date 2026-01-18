@@ -8,12 +8,17 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "apartment.db"
 
+# SQLiteロック対策: タイムアウトを30秒に設定
+DB_TIMEOUT = 30
+
 
 @contextmanager
 def get_connection():
     """データベース接続を取得するコンテキストマネージャ"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     conn.row_factory = sqlite3.Row
+    # WALモードで読み書きの並行性を向上
+    conn.execute("PRAGMA journal_mode=WAL")
     try:
         yield conn
     finally:
