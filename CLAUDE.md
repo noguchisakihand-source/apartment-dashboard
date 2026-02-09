@@ -18,6 +18,7 @@ Claude Code向けのプロジェクト開発ガイド。
 3. geocode.py          → listings に latitude/longitude 追加
 4. calc_market_price.py → market_prices テーブル（相場算出）
 5. calc_deal_score.py  → listings に deal_score 追加
+6. calc_comprehensive_score.py → listings に comprehensive_score 追加（総合スコア）
 6. git push            → Streamlit Cloud に反映（1-2分）
 ```
 
@@ -33,7 +34,8 @@ python3 scripts/fetch_reinfolib.py && \
 python3 scripts/scrape_suumo.py && \
 python3 scripts/geocode.py && \
 python3 scripts/calc_market_price.py && \
-python3 scripts/calc_deal_score.py
+python3 scripts/calc_deal_score.py &&
+python3 scripts/calc_comprehensive_score.py
 ```
 
 ### DB確認コマンド
