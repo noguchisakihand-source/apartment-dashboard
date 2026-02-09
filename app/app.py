@@ -515,6 +515,8 @@ def load_listings() -> pd.DataFrame:
                 l.total_units, l.management_fee, l.repair_reserve, l.structure,
                 l.pet_allowed, l.good_view, l.good_sunlight,
                 l.latitude, l.longitude, l.suumo_url, l.updated_at,
+                l.comprehensive_score, l.building_risk_factor, l.management_factor,
+                l.macro_bonus, l.liquidity_bonus, l.risk_flags,
                 l.first_seen_at, l.last_seen_at, l.price_changed_at, l.previous_price,
                 ph.initial_price, ph.drop_count
             FROM listings l
@@ -1300,6 +1302,142 @@ def build_monthly_cost(row) -> str:
     return ""
 
 
+def render_comprehensive(df: pd.DataFrame):
+    """総合評価タブ: comprehensive_scoreでランキング + 内訳表示"""
+    st.subheader("🎯 総合評価ランキング")
+
+    df_comp = df.dropna(subset=["comprehensive_score"]).copy()
+    if df_comp.empty:
+        st.info("総合スコア算出済みの物件がありません。calc_comprehensive_score.py を実行してください。")
+        return
+
+    sort_col = st.radio(
+        "ソート基準",
+        ["総合スコア", "既存スコア"],
+        horizontal=True,
+        key="comp_sort",
+    )
+    sort_key = "comprehensive_score" if sort_col == "総合スコア" else "deal_score"
+
+    top50 = df_comp.nlargest(50, sort_key)
+
+    show_flags = st.checkbox("⚠️ リスクフラグ付きを除外", value=False, key="hide_flags")
+    if show_flags:
+        top50 = top50[
+            top50["risk_flags"].isna()
+            | (top50["risk_flags"] == "null")
+            | (top50["risk_flags"] == "[]")
+        ]
+
+    for i, (_, row) in enumerate(top50.head(20).iterrows(), 1):
+        comp = row["comprehensive_score"]
+        deal = row["deal_score"] if pd.notna(row["deal_score"]) else 0
+        b_risk = row["building_risk_factor"] if pd.notna(row["building_risk_factor"]) else 1.0
+        mgmt = row["management_factor"] if pd.notna(row["management_factor"]) else 1.0
+        macro = row["macro_bonus"] if pd.notna(row["macro_bonus"]) else 0
+        liq = row["liquidity_bonus"] if pd.notna(row["liquidity_bonus"]) else 0
+        flags = row["risk_flags"] if pd.notna(row["risk_flags"]) and row["risk_flags"] not in ("null", "[]") else None
+
+        if comp >= 10:
+            score_color = "green"
+        elif comp >= 0:
+            score_color = "orange"
+        else:
+            score_color = "red"
+
+        col1, col2, col3 = st.columns([0.3, 3, 1.5])
+
+        with col1:
+            st.markdown(f"### {i}")
+
+        with col2:
+            flag_badge = ""
+            if flags:
+                flag_badge = f" 🚩 `{flags}`"
+
+            name = str(row["property_name"])[:40]
+            st.markdown(f"**{name}**{flag_badge}")
+
+            age = CURRENT_YEAR - int(row["building_year"]) if pd.notna(row["building_year"]) else "?"
+            station = f'{row["station_name"]} 徒歩{int(row["minutes_to_station"])}分' if pd.notna(row["station_name"]) else ""
+            st.caption(
+                f'{row["ward_name"]} / {row["floor_plan"]} / {row["area"]:.0f}㎡ / '
+                f"築{age}年 / {station}"
+            )
+
+            st.caption(
+                f"📊 既存 {deal:+.1f}% × 建物 {b_risk:.2f} × 管理 {mgmt:.2f} "
+                f"+ マクロ {macro:+.1f} + 流動 {liq:+.1f}"
+            )
+
+        with col3:
+            price_man = row["asking_price"] / 10000 if pd.notna(row["asking_price"]) else 0
+            st.markdown(
+                f'<span style="color:{score_color};font-size:22px;font-weight:bold">'
+                f"{comp:+.1f}%</span><br>"
+                f'<span style="font-size:14px">{price_man:,.0f}万円</span>',
+                unsafe_allow_html=True,
+            )
+            if pd.notna(row.get("suumo_url")):
+                st.link_button("SUUMO", row["suumo_url"], key=f'comp_suumo_{row["id"]}')
+
+        st.divider()
+
+    if len(top50) > 20:
+        st.markdown("### 21位〜50位")
+        remaining = top50.iloc[20:]
+        display_df = remaining[[
+            "property_name", "ward_name", "asking_price",
+            "comprehensive_score", "deal_score",
+            "building_risk_factor", "management_factor",
+            "macro_bonus", "liquidity_bonus",
+            "area", "building_year", "risk_flags", "suumo_url"
+        ]].copy()
+        display_df["asking_price"] = display_df["asking_price"] / 10000
+        display_df["building_age"] = display_df["building_year"].apply(
+            lambda y: f"築{CURRENT_YEAR - int(y)}年" if pd.notna(y) else "-"
+        )
+        display_df["property_name"] = display_df["property_name"].apply(
+            lambda x: str(x)[:25] + "..." if len(str(x)) > 25 else x
+        )
+
+        st.dataframe(
+            display_df[[
+                "property_name", "ward_name", "asking_price",
+                "comprehensive_score", "deal_score",
+                "building_risk_factor", "management_factor",
+                "macro_bonus", "liquidity_bonus",
+                "building_age", "risk_flags", "suumo_url"
+            ]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "property_name": st.column_config.TextColumn("物件名"),
+                "ward_name": st.column_config.TextColumn("区"),
+                "asking_price": st.column_config.NumberColumn("価格(万)", format="%.0f"),
+                "comprehensive_score": st.column_config.NumberColumn("総合", format="%+.1f%%"),
+                "deal_score": st.column_config.NumberColumn("既存", format="%+.1f%%"),
+                "building_risk_factor": st.column_config.NumberColumn("建物", format="×%.2f"),
+                "management_factor": st.column_config.NumberColumn("管理", format="×%.2f"),
+                "macro_bonus": st.column_config.NumberColumn("マクロ", format="%+.1f"),
+                "liquidity_bonus": st.column_config.NumberColumn("流動", format="%+.1f"),
+                "building_age": st.column_config.TextColumn("築年"),
+                "risk_flags": st.column_config.TextColumn("フラグ"),
+                "suumo_url": st.column_config.LinkColumn("SUUMO", display_text="詳細"),
+            },
+        )
+
+    st.markdown("### エリア別 総合スコア")
+    area_summary = df_comp.groupby("ward_name").agg(
+        件数=("comprehensive_score", "count"),
+        総合平均=("comprehensive_score", "mean"),
+        既存平均=("deal_score", "mean"),
+    ).round(1).sort_values("総合平均", ascending=False)
+    area_summary["改善幅"] = (area_summary["総合平均"] - area_summary["既存平均"]).round(1)
+    st.dataframe(area_summary, width="stretch")
+
+
+
 def render_top100(df: pd.DataFrame):
     """#16: TOP100パフォーマンス改善 - 上位10件カード+残りテーブル"""
     st.subheader("お買い得 TOP100")
@@ -1906,8 +2044,24 @@ def main():
         bargain = len(df_filtered[df_filtered["deal_score"] > 0]) if not df_filtered.empty else 0
         st.metric("お買い得物件", f"{bargain} 件")
 
+    # 総合スコア統計行
+    col5, col6, col7 = st.columns(3)
+    with col5:
+        df_comp = df_filtered[df_filtered["comprehensive_score"].notna()] if not df_filtered.empty else pd.DataFrame()
+        avg_comp = df_comp["comprehensive_score"].mean() if not df_comp.empty else 0
+        st.metric("総合スコア平均", f"{avg_comp:+.1f}%")
+    with col6:
+        comp_bargain = len(df_filtered[df_filtered["comprehensive_score"] > 0]) if not df_filtered.empty else 0
+        st.metric("総合お買い得", f"{comp_bargain}件")
+    with col7:
+        flagged = 0
+        if not df_filtered.empty:
+            mask = df_filtered["risk_flags"].notna() & (df_filtered["risk_flags"] != "null") & (df_filtered["risk_flags"] != "[]")
+            flagged = int(mask.sum())
+        st.metric("⚠️ リスクフラグ", f"{flagged}件")
+
     # タブでコンテンツ分割 (#22: 分析タブ追加)
-    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ マップ", "🏆 TOP100", "📋 一覧", "📊 分析"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🗺️ マップ", "🏆 TOP100", "🎯 総合評価", "📋 一覧", "📊 分析"])
 
     with tab1:
         render_map(df_filtered)
@@ -1916,9 +2070,12 @@ def main():
         render_top100(df_filtered)
 
     with tab3:
-        render_table(df_filtered)
+        render_comprehensive(df_filtered)
 
     with tab4:
+        render_table(df_filtered)
+
+    with tab5:
         render_analytics(df_filtered)
 
     # #21: フッターに最終更新日時
