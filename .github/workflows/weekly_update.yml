@@ -81,6 +81,12 @@ jobs:
           cd scripts && python calc_deal_score.py
           echo "=== Deal Score Calculation Completed at $(date) ==="
 
+      - name: Calculate Comprehensive Scores
+        run: |
+          echo "=== Comprehensive Score Calculation Started at $(date) ==="
+          cd scripts && python calc_comprehensive_score.py
+          echo "=== Comprehensive Score Calculation Completed at $(date) ==="
+
       - name: Run Geocoding
         run: |
           echo "=== Geocoding Started at $(date) ==="

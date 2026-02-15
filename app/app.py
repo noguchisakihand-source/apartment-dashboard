@@ -503,7 +503,17 @@ def update_url_with_filters(filters: dict):
 def load_listings() -> pd.DataFrame:
     """物件データを読み込み"""
     with get_connection() as conn:
-        df = pd.read_sql_query("""
+        # 総合スコアカラムの存在チェック
+        cursor = conn.execute("PRAGMA table_info('listings')")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        comp_cols = ['comprehensive_score', 'building_risk_factor', 'management_factor',
+                     'macro_bonus', 'liquidity_bonus', 'risk_flags']
+        comp_select = ", ".join(
+            f"l.{c}" if c in existing_cols else f"NULL as {c}"
+            for c in comp_cols
+        )
+
+        df = pd.read_sql_query(f"""
             SELECT
                 l.id, l.property_name, l.ward_name, l.address,
                 l.station_name, l.minutes_to_station,
@@ -515,8 +525,7 @@ def load_listings() -> pd.DataFrame:
                 l.total_units, l.management_fee, l.repair_reserve, l.structure,
                 l.pet_allowed, l.good_view, l.good_sunlight,
                 l.latitude, l.longitude, l.suumo_url, l.updated_at,
-                l.comprehensive_score, l.building_risk_factor, l.management_factor,
-                l.macro_bonus, l.liquidity_bonus, l.risk_flags,
+                {comp_select},
                 l.first_seen_at, l.last_seen_at, l.price_changed_at, l.previous_price,
                 ph.initial_price, ph.drop_count
             FROM listings l
