@@ -1387,7 +1387,7 @@ def render_comprehensive(df: pd.DataFrame):
                 f'<span style="font-size:14px">{price_man:,.0f}万円</span>',
                 unsafe_allow_html=True,
             )
-            if pd.notna(row.get("suumo_url")):
+            if pd.notna(row.get("suumo_url")) and str(row.get("suumo_url", "")).startswith("http"):
                 st.link_button("SUUMO", row["suumo_url"], key=f'comp_suumo_{row["id"]}')
 
         st.divider()
@@ -1540,7 +1540,7 @@ def render_top100(df: pd.DataFrame):
                 f"{row['deal_score']:+.1f}%</span>",
                 unsafe_allow_html=True,
             )
-            if pd.notna(row["suumo_url"]):
+            if pd.notna(row["suumo_url"]) and str(row["suumo_url"]).startswith("http"):
                 st.link_button("SUUMO", row["suumo_url"])
 
         with col5:
@@ -1756,7 +1756,10 @@ def render_table(df: pd.DataFrame):
                 # SUUMOリンク + 閲覧済みマークボタン
                 link_col, mark_col = st.columns([3, 1])
                 with link_col:
-                    st.link_button("SUUMO", row["suumo_url"], use_container_width=True)
+                    if pd.notna(row.get("suumo_url")) and str(row.get("suumo_url", "")).startswith("http"):
+                        st.link_button("SUUMO", row["suumo_url"], use_container_width=True)
+                    else:
+                        st.write("URL未取得")
                 with mark_col:
                     if not is_viewed:
                         if st.button("✓", key=f"view_{row['id']}", help="閲覧済みにする"):
@@ -1842,7 +1845,7 @@ def render_compare(df: pd.DataFrame):
             if pd.notna(row['deal_score']):
                 st.metric("スコア", f"{row['deal_score']:+.1f}%")
 
-            if pd.notna(row["suumo_url"]):
+            if pd.notna(row["suumo_url"]) and str(row["suumo_url"]).startswith("http"):
                 st.link_button("SUUMO詳細", row["suumo_url"], use_container_width=True)
 
             # 価格推移グラフ
