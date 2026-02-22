@@ -1388,7 +1388,7 @@ def render_comprehensive(df: pd.DataFrame):
                 unsafe_allow_html=True,
             )
             if pd.notna(row.get("suumo_url")) and str(row.get("suumo_url", "")).startswith("http"):
-                st.link_button("SUUMO", row["suumo_url"], key=f'comp_suumo_{row["id"]}')
+                st.link_button("SUUMO", str(row["suumo_url"]), key=f'comp_suumo_{row["id"]}')
 
         st.divider()
 
@@ -1541,7 +1541,7 @@ def render_top100(df: pd.DataFrame):
                 unsafe_allow_html=True,
             )
             if pd.notna(row["suumo_url"]) and str(row["suumo_url"]).startswith("http"):
-                st.link_button("SUUMO", row["suumo_url"])
+                st.link_button("SUUMO", str(row["suumo_url"]))
 
         with col5:
             # #14: お気に入りボタン（localStorage永続化対応）
@@ -1757,7 +1757,7 @@ def render_table(df: pd.DataFrame):
                 link_col, mark_col = st.columns([3, 1])
                 with link_col:
                     if pd.notna(row.get("suumo_url")) and str(row.get("suumo_url", "")).startswith("http"):
-                        st.link_button("SUUMO", row["suumo_url"], use_container_width=True)
+                        st.link_button("SUUMO", str(row["suumo_url"]), use_container_width=True)
                     else:
                         st.write("URL未取得")
                 with mark_col:
@@ -1846,7 +1846,7 @@ def render_compare(df: pd.DataFrame):
                 st.metric("スコア", f"{row['deal_score']:+.1f}%")
 
             if pd.notna(row["suumo_url"]) and str(row["suumo_url"]).startswith("http"):
-                st.link_button("SUUMO詳細", row["suumo_url"], use_container_width=True)
+                st.link_button("SUUMO詳細", str(row["suumo_url"]), use_container_width=True)
 
             # 価格推移グラフ
             st.markdown("---")
