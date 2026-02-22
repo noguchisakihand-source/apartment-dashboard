@@ -1388,7 +1388,7 @@ def render_comprehensive(df: pd.DataFrame):
                 unsafe_allow_html=True,
             )
             if pd.notna(row.get("suumo_url")) and str(row.get("suumo_url", "")).startswith("http"):
-                st.link_button("SUUMO", str(row["suumo_url"]), key=f'comp_suumo_{row["id"]}')
+                st.link_button("SUUMO", str(row["suumo_url"]))
 
         st.divider()
 
